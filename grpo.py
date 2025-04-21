@@ -104,9 +104,9 @@ Just provide the paraphrased version of the text, without any introductory or co
 class Actor(nn.Module):
     def __init__(self, embed_map_model_name, watermark_model_name):
         super().__init__()
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        self.gpu0 = torch.device(f"cuda:{cuda_visible_devices.split(',')[0]}")  # for wm model - transformer
-        self.gpu1 = torch.device(f"cuda:{cuda_visible_devices.split(',')[1]}")  # for wm model - vllm
+        # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
+        self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer
         # self.gpu2 = torch.device(f"cuda:{cuda_visible_devices.split(',')[2]}")  # for embed model
         os.environ["VLLM_USE_V1"] = "0"
 
@@ -452,8 +452,11 @@ if __name__ == "__main__":
                         new_logprobs = new_mb_logprobs[j][i]  # [seq_len_i]
                         old_logprobs = mb_logprobs[j][i]
                         old_logprobs = old_logprobs.to(new_logprobs.device)
-                        assert len(new_logprobs) == len(old_logprobs)
-                        ratio = torch.exp(new_logprobs - old_logprobs)
+                        try:
+                            # assert len(new_logprobs) == len(old_logprobs)
+                            ratio = torch.exp(new_logprobs - old_logprobs)
+                        except Exception as e:
+                            import pdb; pdb.set_trace()
                         pg_loss = -mb_advantages[j][i] * ratio
                         loss += pg_loss.sum()
                         total_output_len += len(new_logprobs)
