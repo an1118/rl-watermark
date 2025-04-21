@@ -1,0 +1,14 @@
+accelerate
+transformers
+pandas
+datasets
+tqdm
+scipy
+torch
+wandb
+tenacity
+gymnasium
+tyro
+tensorboard
+vllm
+notebook
