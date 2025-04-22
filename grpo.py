@@ -3,6 +3,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from tqdm import tqdm
 
 import gymnasium as gym
 import numpy as np
@@ -43,7 +44,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
     batch_size: int = 4
     """the batch size"""
-    num_minibatches: int = 1
+    num_minibatches: int = 2
     """the number of mini-batches"""
     eval_interval: int = 5
     """the interval of evaluation"""
@@ -108,7 +109,6 @@ class Actor(nn.Module):
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
         self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer
         # self.gpu2 = torch.device(f"cuda:{cuda_visible_devices.split(',')[2]}")  # for embed model
-        os.environ["VLLM_USE_V1"] = "0"
 
         self.watermark_model_vllm = LLM(
             model="meta-llama/Llama-3.1-8B-Instruct", 
@@ -157,17 +157,25 @@ class Actor(nn.Module):
             logprobs=0,  # only return logprobs for the generated tokens
             logits_processors=logits_processors,
         )
-        outputs = self.watermark_model_vllm.generate([prompt], sampling_params)
+        outputs = self.watermark_model_vllm.generate([prompt], sampling_params, use_tqdm=False)
         ## save output results
         watermarked_texts, output_logprobs = [], []
         output_group = outputs[0].outputs
         for o in output_group:
             text = o.text
             text_ids = o.token_ids
-            logprobs = [lp[id].logprob for lp, id in zip(o.logprobs, text_ids)]
+            # try:
+            #     assert self.watermark_tokenizer(text, return_tensors='pt', add_special_tokens=False)['input_ids'].shape[1] == len(text_ids)
+            #     assert len(text_ids) == len(o.logprobs)
+            # except Exception as e:
+            #     import pdb; pdb.set_trace()
+            #     print(f"Error: {e}")
+
+            logprobs = [lp[id].logprob for lp, id in zip(o.logprobs, text_ids) if id not in [self.watermark_tokenizer.bos_token_id, self.watermark_tokenizer.eos_token_id]]
             watermarked_texts.append(text)
             output_logprobs.append(logprobs)
 
+        # print('done')
         return watermarked_texts, output_logprobs
 
     def get_per_token_logps(self, original_text, watermarked_texts):
@@ -193,7 +201,7 @@ class Actor(nn.Module):
 
         all_logprobs = []
         for wm_text in watermarked_texts:
-            watermarked = self.watermark_tokenizer(wm_text, return_tensors='pt').to(self.watermark_model.device)
+            watermarked = self.watermark_tokenizer(wm_text, return_tensors='pt', add_special_tokens=False).to(self.watermark_model.device)
             ## concatenate
             input_ids = torch.cat((prompt['input_ids'], watermarked['input_ids']), dim=1)
             attention_mask = torch.cat((prompt['attention_mask'], watermarked['attention_mask']), dim=1)
@@ -204,7 +212,6 @@ class Actor(nn.Module):
             all_logprobs.append(per_token_logps)
         
         return all_logprobs
-
 
     def _get_per_token_logps(self, model, green_red_split, input_ids, attention_mask, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
@@ -267,7 +274,6 @@ class Actor(nn.Module):
         # normalized_score = normalized_score.item()
         return normalized_score
 
-        
     def compute_rewards(self, data, watermarked_texts):
         """
         Compute the rewards for the generated watermarked texts.
@@ -313,14 +319,19 @@ class Actor(nn.Module):
         positive_score = sum(positive_scores) / len(positive_scores) if positive_scores else 0
         negative_score = sum(negative_scores) / len(negative_scores) if negative_scores else 0
 
-        detectability_rewards = []
+        detectability_overall = []
+        detectability_ori, detectability_wm, detectability_pos, detectability_neg = [], [], [], []
         for wm_text in watermarked_texts:
             wm_score = self.detect(wm_text)
             reward = - original_score + wm_score + positive_score - negative_score
-            detectability_rewards.append(reward)
+            detectability_overall.append(reward)
+            detectability_ori.append(- original_score)
+            detectability_wm.append(wm_score)
+            detectability_pos.append(positive_score)
+            detectability_neg.append(- negative_score)
         
         rewards = []
-        for d, r, q in zip(detectability_rewards, relevance_scores, text_quality_scores):
+        for d, r, q in zip(detectability_overall, relevance_scores, text_quality_scores):
             reward = d + r + q
             rewards.append(reward)
 
@@ -328,7 +339,11 @@ class Actor(nn.Module):
             'rewards': rewards,
             'relevance_scores': relevance_scores,
             'text_quality_scores': text_quality_scores,
-            'detectability_rewards': detectability_rewards,
+            'detectability_overall': detectability_overall,
+            'detectability_ori': detectability_ori,
+            'detectability_wm': detectability_wm,
+            'detectability_pos': detectability_pos,
+            'detectability_neg': detectability_neg,
         }
 
         return result_dict
@@ -336,6 +351,9 @@ class Actor(nn.Module):
 
 
 if __name__ == "__main__":
+    os.environ["VLLM_USE_V1"] = "0"
+    os.environ["VLLM_DISABLE_PROGRESS_BAR"] = "true"
+
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     run_name = f"wm__{args.exp_name}__{args.seed}"
@@ -378,7 +396,7 @@ if __name__ == "__main__":
     start_time = time.time()
 
 
-    for iteration in range(1, args.num_iterations + 1):
+    for iteration in tqdm(range(1, args.num_iterations + 1), desc="Training iterations"):
         # Annealing the rate if instructed to do so.  TODO
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -391,6 +409,8 @@ if __name__ == "__main__":
             # rollout before optimization
             all_watermarked_text, all_logprobs, all_rewards = [], [], []  # [B, G]
             all_rewards_relevance, all_rewards_text_quality, all_rewards_detectability = [], [], []  # [B*G]
+            all_rewards_detectability_ori, all_rewards_detectability_wm = [], []
+            all_rewards_detectability_pos, all_rewards_detectability_neg = [], []
             for data_idx in range(len(batch['original'])):
                 data = {k: batch[k][data_idx] for k in batch.keys()}
                 with torch.no_grad():
@@ -405,15 +425,33 @@ if __name__ == "__main__":
 
                 all_rewards_relevance.extend(result_dict['relevance_scores'])
                 all_rewards_text_quality.extend(result_dict['text_quality_scores'])
-                all_rewards_detectability.extend(result_dict['detectability_rewards'])
+                all_rewards_detectability.extend(result_dict['detectability_overall'])
+                all_rewards_detectability_ori.extend(result_dict['detectability_ori'])
+                all_rewards_detectability_wm.extend(result_dict['detectability_wm'])
+                all_rewards_detectability_pos.extend(result_dict['detectability_pos'])
+                all_rewards_detectability_neg.extend(result_dict['detectability_neg'])
 
-            if global_step != 0:
+            if global_step != -1:  # TODO: debug
                 # record detailed rewards
+                print(
+                    f"Step: {global_step}, "
+                    f"relevance: {np.mean(all_rewards_relevance):.4f}, "
+                    f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
+                    f"detectability_overall: {torch.mean(torch.stack(all_rewards_detectability)).item():.4f}, "
+                    f"detectability_ori: {torch.mean(torch.stack(all_rewards_detectability_ori)).item():.4f}, "
+                    f"detectability_wm: {torch.mean(torch.stack(all_rewards_detectability_wm)).item():.4f}, "
+                    f"detectability_pos: {torch.mean(torch.stack(all_rewards_detectability_pos)).item():.4f}, "
+                    f"detectability_neg: {torch.mean(torch.stack(all_rewards_detectability_neg)).item():.4f}"
+                )
                 wandb.log({
                     "relevance_scores": np.mean(all_rewards_relevance),
                     "text_quality_scores": np.mean(all_rewards_text_quality),
-                    "detectability_rewards": np.mean(all_rewards_detectability),
-                }, step=global_step)
+                    "detectability_overall": torch.mean(torch.stack(all_rewards_detectability)).item(),
+                    "detectability_ori": torch.mean(torch.stack(all_rewards_detectability_ori)).item(),
+                    "detectability_wm": torch.mean(torch.stack(all_rewards_detectability_wm)).item(),
+                    "detectability_pos": torch.mean(torch.stack(all_rewards_detectability_pos)).item(),
+                    "detectability_neg": torch.mean(torch.stack(all_rewards_detectability_neg)).item(),
+                })  # , step=global_step
 
             b_logprobs = all_logprobs  # [B, G, seq_len_i]
             b_rewards = torch.tensor(all_rewards)  # [B, G]
@@ -437,15 +475,13 @@ if __name__ == "__main__":
                 mb_logprobs = [b_logprobs[idx] for idx in mb_inds]  # [mb_size, G, seq_len_i]
                 mb_advantages = b_advantages[mb_inds]  # [mb_size, G]
 
-                new_all_logprobs = []
+                new_mb_logprobs = []  # [mb_size, G, seq_len_i]
                 for original_text, watermarked_texts in zip(mb_original_text, mb_watermarked_text):
                     new_logprobs = actor.get_per_token_logps(original_text, watermarked_texts)  # [G, seq_len_i]
                     new_logprobs = new_logprobs  # [G, seq_len_i]
                     # new_logprobs = [torch.tensor(lg) for lg in new_logprobs]  # [G, seq_len_i]
-                    new_all_logprobs.append(new_logprobs)
+                    new_mb_logprobs.append(new_logprobs)
                 
-                new_mb_logprobs = new_all_logprobs  # [mb_size, G, seq_len_i]
-
                 loss, total_output_len = 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
@@ -456,7 +492,10 @@ if __name__ == "__main__":
                             # assert len(new_logprobs) == len(old_logprobs)
                             ratio = torch.exp(new_logprobs - old_logprobs)
                         except Exception as e:
+                            print(e)
+                            print(j, i)
                             import pdb; pdb.set_trace()
+                            print(e)
                         pg_loss = -mb_advantages[j][i] * ratio
                         loss += pg_loss.sum()
                         total_output_len += len(new_logprobs)
@@ -474,7 +513,7 @@ if __name__ == "__main__":
                 # TRY NOT TO MODIFY: record rewards for plotting purposes
                 writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
                 writer.add_scalar("losses/policy_loss", loss.item(), global_step)
-                print("loss:", loss.item())
+                print("Step:", global_step, "loss:", loss.item())
                 # print("SPS:", int(global_step / (time.time() - start_time)))
                 # writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
