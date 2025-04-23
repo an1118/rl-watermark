@@ -103,3 +103,12 @@ def sign_ste(x):
 
 def safe(t, device):
     return t if t is not None else torch.tensor(0.0, device=device)
+
+
+def fill_na(values):
+    if all(v is None for v in values):
+        return [0.0] * len(values)
+    values = [v.item() if isinstance(v, torch.Tensor) else v for v in values]
+    valid_values = [v for v in values if v is not None]
+    avg_value = sum(valid_values) / len(valid_values) if valid_values else 0.0
+    return [avg_value if v is None else v for v in values]

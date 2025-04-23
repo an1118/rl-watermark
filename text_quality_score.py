@@ -8,6 +8,7 @@ import sys
 sys.path.append('..')
 from api import call_chatgpt_api
 import os
+from vllm import SamplingParams
 
 TEXT_QUALITY_JUDGE = '''You are given an original text and its paraphrased version. Your task is to evaluate the paraphrase based on the following **two criteria**, using a score of **1 (Poor), 2 (Fair), or 3 (Good)** for each:
 
@@ -44,40 +45,59 @@ def extract_assessment_results(response: str):
         dict: A dictionary with keys 'Text quality', 'Relevance', and 'Overall',
               containing extracted values or None if not found.
     """
-    pattern = r".*(?:Text quality|Quality).*\[\[(.*?)\]\]\s*" \
-              r".*(?:Relevance|Relevancy).*\[\[(.*?)\]\]\s*" \
-              r".*(?:Overall).*\[\[(.*?)\]\]"
+    def extract(label):
+        pattern = rf"{label}:\s*(?:\[\[(.*?)\]\]|(\d+))"
+        match = re.search(pattern, response, re.IGNORECASE)
+        if match:
+            return match.group(1) or match.group(2)
+        return None
+
+    return {
+        "Text quality": extract("Text quality"),
+        "Relevance": extract("Relevance"),
+        "Overall": extract("Overall"),
+    }
+
+    # pattern = r".*(?:Text quality|Quality).*\[\[(.*?)\]\]\s*" \
+    #           r".*(?:Relevance|Relevancy).*\[\[(.*?)\]\]\s*" \
+    #           r".*(?:Overall).*\[\[(.*?)\]\]"
     
-    match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
+    # match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
     
-    if match:
-        return {
-            "Text quality": match.group(1).strip(),
-            "Relevance": match.group(2).strip(),
-            "Overall": match.group(3).strip()
-        }
-    return None  # If the pattern is not found
+    # if match:
+    #     return {
+    #         "Text quality": match.group(1).strip(),
+    #         "Relevance": match.group(2).strip(),
+    #         "Overall": match.group(3).strip()
+    #     }
+    # return None  # If the pattern is not found
 
 
-def _judge_text_quality(original_text, paraphrased_text):
+def _judge_text_quality(original_text, paraphrased_text, model='gpt-4o', vllm_model=None, tokenizer=None):
     messages = [
         {"role": "system", "content": TEXT_QUALITY_JUDGE},
         {"role": "user", "content": f"[Original text]: \n{original_text}\n\n[Paraphrased Text]: \n{paraphrased_text}"}
     ]
     max_tokens = 1000
-    max_calls = 3
+    max_calls = 1
     cur_call = 0
 
-    while(cur_call <= max_calls):
+    while(cur_call < max_calls):
         cur_call += 1
         if cur_call > 1:
             print(f"Retrying... (Attempt {cur_call})", flush=True)
         try:
-            response = call_chatgpt_api(messages, max_tokens, model='gpt-4o-mini')
+            if vllm_model:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0)
+                response = vllm_model.generate([prompt], sampling_params, use_tqdm=False)
+                response = response[0].outputs[0].text
+            else:               
+                response = call_chatgpt_api(messages, max_tokens, temperature=0, model=model)
+                response = response.choices[0].message.content
         except RetryError as e:
             print(e, flush=True)
             continue
-        response = response.choices[0].message.content
         if response is not None:
             # extract the assessment results
             assessment_results = extract_assessment_results(response)
@@ -89,6 +109,7 @@ def _judge_text_quality(original_text, paraphrased_text):
                     return assessment_results
                 else:
                     print('Invalid scores found in the response.', flush=True)
+                    print(assessment_results, flush=True)
                     continue
             else:
                 print('Assessment results not found in the response.', flush=True)

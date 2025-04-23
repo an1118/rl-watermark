@@ -6,6 +6,7 @@ import re
 import random
 from api import call_chatgpt_api
 from tenacity import RetryError
+from vllm import SamplingParams
 
 import pdb
 
@@ -153,7 +154,7 @@ def decide_modified_sentiment(original_sentiment):
     else:
         return random.choice(['negative', 'positive'])
     
-def sentiment_judge(text, model):
+def sentiment_judge(text, model, vllm_model=None, tokenizer=None):
     if not text:
         return None
     messages = [
@@ -168,23 +169,36 @@ def sentiment_judge(text, model):
     cnt = 0
     while(keep_call):
         try:
-            response = call_chatgpt_api(messages, max_tokens=500, temperature=0, model=model)
-        except RetryError as e:
-            print(e)
-            return
-        if response.choices[0].message.content:
-            evaluation = response.choices[0].message.content.strip()
-            sentiment_match = re.search(r"(?i)Sentiment: \[\[(positive|negative|neutral)\]\]", evaluation)
-            if sentiment_match:
-                sentiment = sentiment_match.group(1).lower()
-                return sentiment
-        else:
-            cnt += 1
-            if cnt <= 10:
-                print('===try calling api one more time===')
+            if vllm_model:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                sampling_params = SamplingParams(max_tokens=500, temperature=0.5)
+                response = vllm_model.generate([prompt], sampling_params, use_tqdm=False)
+                response = response[0].outputs[0].text
             else:
-                print(f'API call failed!')
-                return
+                response = call_chatgpt_api(messages, max_tokens=500, temperature=0.5, model=model)
+                response = response.choices[0].message.content
+        except RetryError as e:
+            print(e, flush=True)
+            return
+        if response:
+            evaluation = response.strip()
+            sentiment_match = re.search(
+                r"(?i)Sentiment:\s*(?:\[\[(positive|negative|neutral)\]\]|(positive|negative|neutral))",
+                evaluation
+            )
+            if sentiment_match:
+                sentiment = sentiment_match.group(1) or sentiment_match.group(2)
+                return sentiment.lower()
+            # sentiment_match = re.search(r"(?i)Sentiment: \[\[(positive|negative|neutral)\]\]", evaluation)
+            # if sentiment_match:
+            #     sentiment = sentiment_match.group(1).lower()
+            #     return sentiment.lower()
+        cnt += 1
+        if cnt <= 3:
+            print('===try one more time===', flush=True)
+        else:
+            print(f'Sentiment judge failed!', flush=True)
+            return
 
 def word_level_edit_distance(text1, text2):
     if not isinstance(text1, str) or not isinstance(text2, str):
@@ -219,57 +233,35 @@ def word_level_edit_distance(text1, text2):
     
     return dp[len1][len2]
 
-def shuffle_attack(text):
-    # sentence-level tokenize
-    text_list = nltk.sent_tokenize(text)
-    shuffle(text_list)
-
-    prompt_0 = '''Please help transform the following list of sentences into a well-structured paragraph. \nEnsure that each sentence is included, the original meaning is preserved, and the overall flow is logical and coherent. Do not add any additional information beyond the provided sentences. \nHere is the list of sentences: '''
-    prompt_1 = text_list
-    prompt = f'{prompt_0}\n{prompt_1}\n'
-
-    messages = [{"role": "user", "content": prompt}]
-    max_tokens = 300
-    keep_call = True
-    cnt = 0
-    while(keep_call):
-        # Make the API call
-        response = call_chatgpt_api(messages, max_tokens)
-        output_text = response.choices[0].message.content
-        if output_text:  # not None
-            keep_call = False
-            return output_text
-        else:
-            cnt += 1
-            if cnt <= 10:
-                print('===try calling api one more time===')
-            else:
-                print('API call failed!')
-                return None
-
-def base_attack(messages, max_tokens=500, max_call=10, model='gpt-4o'):
+def base_attack(messages, max_tokens=500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
     keep_call = True
     cnt = 0
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens=max_tokens, model=model)
+            if vllm_model:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                sampling_params = SamplingParams(max_tokens=max_tokens, temperature=1)
+                response = vllm_model.generate([prompt], sampling_params, use_tqdm=False)
+                output_text = response[0].outputs[0].text
+            else:
+                response = call_chatgpt_api(messages, max_tokens=max_tokens, model=model)
+                output_text = response.choices[0].message.content
         except RetryError as e:
-            print(e)
+            print(e, flush=True)
             return None
-        output_text = response.choices[0].message.content
         if output_text:  # not None
             keep_call = False
             return output_text
         else:
             cnt += 1
             if cnt <= max_call:
-                print('===try calling api one more time===')
+                print('===try one more time===', flush=True)
             else:
-                print('API call failed!')
+                print('Base attack failed!', flush=True)
                 return None
 
-def paraphrase_attack(text, max_tokens=500, max_call=10, model='gpt-4o'):
+def paraphrase_attack(text, max_tokens=500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
 
     messages = [
         {
@@ -280,12 +272,12 @@ def paraphrase_attack(text, max_tokens=500, max_call=10, model='gpt-4o'):
         },
     ]
 
-    response = base_attack(messages, max_tokens=max_tokens, max_call=max_call, model=model)
+    response = base_attack(messages, max_tokens=max_tokens, max_call=max_call, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
     return response
 
 def extract_info(text):
     if not isinstance(text, str):
-        print(text)
+        print(text, flush=True)
         return None
     import re
     pattern = r"\[MODIFIED_TEXT\](.*?)(\[/MODIFIED_TEXT\]|(?=\Z))"
@@ -293,9 +285,9 @@ def extract_info(text):
     extracted = match.group(1).strip() if match else None
     return extracted
 
-def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
+def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
     # return: original_sentiment, target_modified_sentiment, modified_sentiment, spoofing_text, output_text
-    original_sentiment = sentiment_judge(text, model=model)
+    original_sentiment = sentiment_judge(text, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
     target_modified_sentiment = decide_modified_sentiment(original_sentiment)
     max_change = int(len(text.split()) * 0.2)
     
@@ -315,9 +307,16 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens, model=model)
+            if vllm_model:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                sampling_params = SamplingParams(max_tokens=max_tokens, temperature=1)
+                response = vllm_model.generate([prompt], sampling_params, use_tqdm=False)
+                output_text = response[0].outputs[0].text
+            else:
+                response = call_chatgpt_api(messages, max_tokens, model=model)
+                output_text = response.choices[0].message.content
         except RetryError as e:
-            print(e)
+            print(e, flush=True)
             result_dict = {
                 'original_sentiment': original_sentiment,
                 'target_modified_sentiment': target_modified_sentiment,
@@ -328,7 +327,6 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
                 'success_spoofing': False,
             }
             return result_dict
-        output_text = response.choices[0].message.content
         if output_text:  # not None
             keep_call = False
             if 'Response Format' in prompt:
@@ -338,7 +336,7 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
                 spoofing_text = output_text
 
             # check if the sentiment is correctly modified
-            modified_sentiment = sentiment_judge(spoofing_text, model=model)
+            modified_sentiment = sentiment_judge(spoofing_text, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
             if modified_sentiment == target_modified_sentiment:
                 keep_call = False
             elif modified_sentiment != original_sentiment:
@@ -361,9 +359,9 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
             
         cnt += 1
         if cnt < max_call:
-            print('===try calling api one more time===')
+            print('===try one more time===', flush=True)
         else:
-            print('Spoofing attack: API call failed!')
+            print('Spoofing attack failed!', flush=True)
             result_dict = {
                 'original_sentiment': original_sentiment,
                 'target_modified_sentiment': target_modified_sentiment,
@@ -375,7 +373,7 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o'):
             }
             return result_dict
 
-def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, max_tokens = 300, max_call=10, model='gpt-4o'):
+def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, max_tokens = 300, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
     # return: original_sentiment, target_modified_sentiment, modified_sentiment, spoofing_text, output_text
 
     # split text into two parts
@@ -409,27 +407,33 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens, model=model)
+            if vllm_model:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                sampling_params = SamplingParams(max_tokens=max_tokens, temperature=1)
+                response = vllm_model.generate([prompt], sampling_params, use_tqdm=False)
+                output_text = response[0].outputs[0].text
+            else:
+                response = call_chatgpt_api(messages, max_tokens, model=model)
+                output_text = response.choices[0].message.content
         except RetryError as e:
-            print(e)
+            print(e, flush=True)
             result_dict = {
                 'latter_spoofing_watermarked_text': None,
                 'final_call_latter_spoofing_watermarked_text': None,
                 'success_latter_spoofing': False,
             }
             return result_dict
-        output_text = response.choices[0].message.content
         if output_text:  # not None
             if 'Response Format' in prompt:
                 spoofing_text = extract_info(output_text)
                 if spoofing_text is None:
-                    print('Can\'t extract info from response!')
+                    print('Can\'t extract info from response!', flush=True)
                     cnt += 1
                     if cnt < max_call:
-                        print('===try calling api one more time===')
+                        print('===try one more time===', flush=True)
                         continue
                     else:
-                        print('Latter spoofing attack: API call failed!')
+                        print('Latter spoofing attack failed!', flush=True)
                         result_dict = {
                             'latter_spoofing_watermarked_text': None,
                             'final_call_latter_spoofing_watermarked_text': None,
@@ -441,7 +445,7 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
                 spoofing_text = output_text
             spoofing_text = unchanged_text + ' ' + spoofing_text
             # check if the sentiment is correctly modified
-            modified_sentiment = sentiment_judge(spoofing_text, model=model)
+            modified_sentiment = sentiment_judge(spoofing_text, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
             if modified_sentiment == target_modified_sentiment:
                 keep_call = False
             elif modified_sentiment != original_sentiment:
@@ -460,9 +464,9 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
             
         cnt += 1
         if cnt < max_call:
-            print('===try calling api one more time===')
+            print('===try one more time===', flush=True)
         else:
-            print('Latter spoofing attack: API call failed!')
+            print('Latter spoofing attack failed!', flush=True)
             result_dict = {
                 'latter_spoofing_watermarked_text': None,
                 'final_call_latter_spoofing_watermarked_text': spoofing_text,
@@ -476,51 +480,3 @@ def hate_attack(hate_list, text):
     hate_string = ' '.join(hate_words)
     hate_text = text + ' ' + hate_string
     return hate_text
-
-def factual_change_attack(text):
-    # Step 1: Extract Top 10 Most Important Facts (Strict Format)
-    messages = [
-        {
-            "role": "system", "content": fact_extraction_prompt,
-        },
-        {
-            "role": "user",  "content": text.strip()
-        },
-    ]
-    response = base_attack(messages)
-    if not response:
-        print('Fact extraction failed!')
-        return None
-
-    # Step 2: Select 5 Random Facts (Or Fewer If Less Exist)
-    def extract_facts(llm_output):
-        """Extracts facts from the formatted LLM output."""
-        pattern = r"<fact\d+>(.*?)</fact\d+>"
-        facts = re.findall(pattern, llm_output)
-        return facts
-
-    def select_facts(facts, num_to_select=5):
-        """Randomly selects up to num_to_select facts from the list."""
-        return random.sample(facts, min(len(facts), num_to_select))
-    
-    facts = extract_facts(response)
-    if len(facts) > 0:
-        selected_facts = select_facts(facts, 5)
-    else:
-        return None
-
-    # Step 3: Modify Only the Selected Facts in the Text 
-    user_content = f'''**Original Text:**  \n{text.strip()}\n\n**Selected Facts to Modify:**  \n'''
-    for i, fact in enumerate(selected_facts, 1):
-        user_content += f"{i}. **{fact}**\n"
-
-    messages = [
-        {
-            "role": "system", "content": factual_change_prompt,
-        },
-        {
-            "role": "user",  "content": user_content
-        },
-    ]
-    response = base_attack(messages)
-    return response
