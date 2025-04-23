@@ -99,3 +99,7 @@ def selective_log_softmax(logits, index):
 def sign_ste(x):
     x_nogradient = x.detach()
     return x + x.sign() - x_nogradient
+
+
+def safe(t, device):
+    return t if t is not None else torch.tensor(0.0, device=device)

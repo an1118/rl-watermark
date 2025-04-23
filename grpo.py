@@ -4,23 +4,23 @@ import random
 import time
 from dataclasses import dataclass
 from tqdm import tqdm
+import json
 
-import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-from torch.utils.tensorboard import SummaryWriter
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from datasets import load_dataset
 
 from models_cl import RobertaForCL
-from util import vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, sign_ste, watermark_logits_bias
+from util import vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, sign_ste, watermark_logits_bias, safe
 from text_quality_score import _judge_text_quality
+from attack import paraphrase_attack, spoofing_attack, latter_spoofing_attack, hate_attack
 
 @dataclass
 class Args:
@@ -42,15 +42,15 @@ class Args:
     # GRPO training arguments
     num_iterations: int = 200
     """the number of iterations (computed in runtime)"""
-    batch_size: int = 4
+    batch_size: int = 16  # 16
     """the batch size"""
-    num_minibatches: int = 2
+    num_minibatches: int = 2  # 1
     """the number of mini-batches"""
     eval_interval: int = 5
     """the interval of evaluation"""
-    G: int = 2
+    G: int = 8  # 8
     """the number of rollouts generated for each original text"""
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 1e-5
     """the learning rate of the optimizer"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
@@ -132,6 +132,9 @@ class Actor(nn.Module):
         self.alpha = 2.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
 
+        hate_phrases_path = "hate_phrase.json"
+        with open(hate_phrases_path, 'r') as f:
+            self.hate_phrases_list = json.load(f)
 
     def rollout(self, text, G):
         # get G/R split
@@ -159,7 +162,7 @@ class Actor(nn.Module):
         )
         outputs = self.watermark_model_vllm.generate([prompt], sampling_params, use_tqdm=False)
         ## save output results
-        watermarked_texts, output_logprobs = [], []
+        watermarked_texts, watermarked_texts_ids, output_logprobs = [], [], []
         output_group = outputs[0].outputs
         for o in output_group:
             text = o.text
@@ -171,14 +174,15 @@ class Actor(nn.Module):
             #     import pdb; pdb.set_trace()
             #     print(f"Error: {e}")
 
-            logprobs = [lp[id].logprob for lp, id in zip(o.logprobs, text_ids) if id not in [self.watermark_tokenizer.bos_token_id, self.watermark_tokenizer.eos_token_id]]
-            watermarked_texts.append(text)
+            logprobs = [lp[id].logprob for lp, id in zip(o.logprobs, text_ids)]
+            watermarked_texts.append(text) 
+            watermarked_texts_ids.append(text_ids)
             output_logprobs.append(logprobs)
 
         # print('done')
-        return watermarked_texts, output_logprobs
+        return watermarked_texts, watermarked_texts_ids, output_logprobs
 
-    def get_per_token_logps(self, original_text, watermarked_texts):
+    def get_per_token_logps(self, original_text, watermarked_texts_ids):
         '''
         Compute the log probabilities of the watermarked text given the original text.
         '''
@@ -200,12 +204,13 @@ class Actor(nn.Module):
         prompt = self.watermark_tokenizer(prompt, return_tensors='pt').to(self.watermark_model.device)
 
         all_logprobs = []
-        for wm_text in watermarked_texts:
-            watermarked = self.watermark_tokenizer(wm_text, return_tensors='pt', add_special_tokens=False).to(self.watermark_model.device)
+        for wm_text_ids in watermarked_texts_ids:
+            watermarked = torch.tensor(wm_text_ids).unsqueeze(0).to(self.watermark_model.device)
+            watermarked_attention_mask = torch.ones(watermarked.size()).to(self.watermark_model.device)
             ## concatenate
-            input_ids = torch.cat((prompt['input_ids'], watermarked['input_ids']), dim=1)
-            attention_mask = torch.cat((prompt['attention_mask'], watermarked['attention_mask']), dim=1)
-            logits_to_keep = watermarked['input_ids'].size(1)  # only need to compute the logits for the watermarked tokens
+            input_ids = torch.cat((prompt['input_ids'], watermarked), dim=1)
+            attention_mask = torch.cat((prompt['attention_mask'],watermarked_attention_mask), dim=1)
+            logits_to_keep = watermarked.size(1)  # only need to compute the logits for the watermarked tokens
 
             per_token_logps = self._get_per_token_logps(self.watermark_model, green_red_split, input_ids, attention_mask, logits_to_keep)
             per_token_logps = per_token_logps.squeeze(0)
@@ -246,11 +251,15 @@ class Actor(nn.Module):
         return entropy
 
     def detect(self, text):
+        if not text:  # empty text
+            return None
+        
         green_red_split = self._get_green_red_split(text).detach()  # the advantage term in the original policy gradient shouldn't have gradient
 
-        input_ids = self.embed_map_tokenizer.encode(
-            text,
+        input_ids = self.watermark_tokenizer.encode(
+            text, 
             return_tensors='pt',
+            add_special_tokens=False
         ).to(self.embed_map_model.device)
 
         logits = self.watermark_model(input_ids=input_ids, logits_to_keep=input_ids.size(1)).logits
@@ -262,7 +271,6 @@ class Actor(nn.Module):
                 s = green_red_split[token_id]
                 score.append(s)
             else:
-                # measure_ids = input_ids[0][:i].clone().detach().unsqueeze(0)
                 measure_entropy = self._next_token_entropy(logits[i - 1, :])  # first token doesn't have logits
                 if measure_entropy >= self.alpha:
                     s = green_red_split[token_id]
@@ -298,52 +306,75 @@ class Actor(nn.Module):
             text_quality_scores.append(text_quality)
 
         # detectability
-        positive_scores, negative_scores = [], []
-        negative_cname_prefixes = ['sentiment', 'latter_sentiment', 'hate']
-        negative_cnames = [f'{p}_spoof_0' for p in negative_cname_prefixes]
-
-        original_score = self.detect(data['original'])
-
-        for cname, text in data.items():
-            if cname == 'original':
-                continue
-
-            if cname.startswith('paraphrase'):
-                score = self.detect(text)
-                positive_scores.append(score)
-            elif cname in negative_cnames:
-                if text:
-                    score = self.detect(text)
-                    negative_scores.append(score)
-
-        positive_score = sum(positive_scores) / len(positive_scores) if positive_scores else 0
-        negative_score = sum(negative_scores) / len(negative_scores) if negative_scores else 0
-
-        detectability_overall = []
-        detectability_ori, detectability_wm, detectability_pos, detectability_neg = [], [], [], []
-        for wm_text in watermarked_texts:
-            wm_score = self.detect(wm_text)
-            reward = - original_score + wm_score + positive_score - negative_score
-            detectability_overall.append(reward)
-            detectability_ori.append(- original_score)
-            detectability_wm.append(wm_score)
-            detectability_pos.append(positive_score)
-            detectability_neg.append(- negative_score)
+        detect_overall = []
+        detect_ori, detect_wm = [], []
+        detect_para, detect_senti, detect_senti_latter, detect_hate = [], [], [], []
         
+        original_score = self.detect(data['original'])
+        detect_ori.append(original_score)
+        for wm_text in watermarked_texts:
+            # detect
+            wm_score = self.detect(wm_text)
+            detect_wm.append(wm_score)
+
+            # paraphrase attack
+            para_wm_text = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
+            para_wm_score = self.detect(para_wm_text)
+            if para_wm_score is not None: detect_para.append(para_wm_score)
+
+            # sentiment spoofing attack
+            senti_result_dict = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
+            senti_wm_text = senti_result_dict['spoofing_watermarked_text']
+            senti_wm_score = self.detect(senti_wm_text)
+            if senti_wm_score is not None: detect_senti.append(senti_wm_score)
+
+            # latter sentiment spoofing attack
+            original_sentiment = senti_result_dict['original_sentiment']
+            target_modified_sentiment = senti_result_dict['target_modified_sentiment']
+            latter_senti_result_dict = latter_spoofing_attack(wm_text, original_sentiment, target_modified_sentiment, max_call=1, model='gpt-4o')
+            latter_senti_wm_text = latter_senti_result_dict['latter_spoofing_watermarked_text']
+            latter_senti_wm_score = self.detect(latter_senti_wm_text)
+            if latter_senti_wm_score is not None: detect_senti_latter.append(latter_senti_wm_score)
+
+            # hate spoofing attack
+            hate_wm_text = hate_attack(self.hate_phrases_list, wm_text)
+            hate_wm_score = self.detect(hate_wm_text)
+            if hate_wm_score is not None: detect_hate.append(hate_wm_score)
+
+            # overall detectability            
+            detectability = (
+                - original_score
+                + wm_score
+                + safe(para_wm_score, original_score.device)
+                - safe(senti_wm_score, original_score.device)
+                - safe(latter_senti_wm_score, original_score.device)
+                - safe(hate_wm_score, original_score.device)
+            )
+            detect_overall.append(detectability)
+
+        # overall reward
         rewards = []
-        for d, r, q in zip(detectability_overall, relevance_scores, text_quality_scores):
+        for d, r, q in zip(detect_overall, relevance_scores, text_quality_scores):
             reward = d + r + q
             rewards.append(reward)
 
+        G = len(watermarked_texts)  # debug
         result_dict = {
             'rewards': rewards,
             'relevance_scores': relevance_scores,
             'text_quality_scores': text_quality_scores,
-            'detectability_overall': detectability_overall,
-            'detectability_ori': detectability_ori,
-            'detectability_wm': detectability_wm,
-            'detectability_pos': detectability_pos,
-            'detectability_neg': detectability_neg,
+            'detect_overall': detect_overall,
+            'detect_ori': detect_ori,
+            'detect_wm': detect_wm,
+            'detect_para': detect_para,
+            'detect_senti': detect_senti,
+            'detect_senti_latter': detect_senti_latter,
+            'detect_hate': detect_hate,
+            # =======debug======== #
+            'sucess_para': len(detect_para) / G,
+            'sucess_senti': len(detect_senti) / G,
+            'sucess_senti_latter': len(detect_senti_latter) / G,
+            'sucess_hate': len(detect_hate) / G,
         }
 
         return result_dict
@@ -356,7 +387,7 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"wm__{args.exp_name}__{args.seed}"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
 
     if args.track:
         import wandb
@@ -364,16 +395,10 @@ if __name__ == "__main__":
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
             config=vars(args),
             name=run_name,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -407,51 +432,75 @@ if __name__ == "__main__":
             batch = train_set[i : i + args.batch_size]
 
             # rollout before optimization
-            all_watermarked_text, all_logprobs, all_rewards = [], [], []  # [B, G]
-            all_rewards_relevance, all_rewards_text_quality, all_rewards_detectability = [], [], []  # [B*G]
-            all_rewards_detectability_ori, all_rewards_detectability_wm = [], []
-            all_rewards_detectability_pos, all_rewards_detectability_neg = [], []
-            for data_idx in range(len(batch['original'])):
+            all_watermarked_texts, all_watermarked_text_ids, all_logprobs = [], [], []  # [B, G]
+            ## rollout
+            for data_idx in tqdm(range(len(batch['original'])), desc="Rolling out one batch"):
                 data = {k: batch[k][data_idx] for k in batch.keys()}
                 with torch.no_grad():
-                    watermarked_texts, logprobs = actor.rollout(data['original'], args.G)
-                result_dict = actor.compute_rewards(data, watermarked_texts)  # [G]
-                rewards = result_dict['rewards']  # [G]
-
-                all_watermarked_text.append(watermarked_texts)
+                    watermarked_texts, watermarked_texts_ids, logprobs = actor.rollout(data['original'], args.G)
+                all_watermarked_texts.append(watermarked_texts)
+                all_watermarked_text_ids.append(watermarked_texts_ids)
                 logprobs = [torch.tensor(lg) for lg in logprobs]  # [G, seq_len_i]
                 all_logprobs.append(logprobs)
-                all_rewards.append(rewards)
+            
+            ## compute rewards
+            all_rewards = []  # [B, G]
+            all_rewards_relevance, all_rewards_text_quality, all_rewards_detect = [], [], []  # [B*G]
+            all_rewards_detect_ori, all_rewards_detect_wm = [], []
+            all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
+            # ==========debug======== #
+            all_success_para, all_success_senti, all_success_senti_latter, all_success_hate = [], [], [], []
+            for data_idx in tqdm(range(len(batch['original'])), desc="Computing rewards"):
+                data = {k: batch[k][data_idx] for k in batch.keys()}
+                watermarked_texts = all_watermarked_texts[data_idx]
 
+                result_dict = actor.compute_rewards(data, watermarked_texts)  # [G]
+                all_rewards.append(result_dict['rewards'])
                 all_rewards_relevance.extend(result_dict['relevance_scores'])
                 all_rewards_text_quality.extend(result_dict['text_quality_scores'])
-                all_rewards_detectability.extend(result_dict['detectability_overall'])
-                all_rewards_detectability_ori.extend(result_dict['detectability_ori'])
-                all_rewards_detectability_wm.extend(result_dict['detectability_wm'])
-                all_rewards_detectability_pos.extend(result_dict['detectability_pos'])
-                all_rewards_detectability_neg.extend(result_dict['detectability_neg'])
+                all_rewards_detect.extend(result_dict['detect_overall'])
+                all_rewards_detect_ori.extend(result_dict['detect_ori'])
+                all_rewards_detect_wm.extend(result_dict['detect_wm'])
+                all_rewards_detect_para.extend(result_dict['detect_para'])
+                all_rewards_detect_senti.extend(result_dict['detect_senti'])
+                all_rewards_detect_senti_latter.extend(result_dict['detect_senti_latter'])
+                all_rewards_detect_hate.extend(result_dict['detect_hate'])
+                # ==========debug======== #
+                all_success_para.append(result_dict['sucess_para'])
+                all_success_senti.append(result_dict['sucess_senti'])
+                all_success_senti_latter.append(result_dict['sucess_senti_latter'])
+                all_success_hate.append(result_dict['sucess_hate'])
 
-            if global_step != -1:  # TODO: debug
+            if global_step != 0:
                 # record detailed rewards
                 print(
                     f"Step: {global_step}, "
                     f"relevance: {np.mean(all_rewards_relevance):.4f}, "
                     f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
-                    f"detectability_overall: {torch.mean(torch.stack(all_rewards_detectability)).item():.4f}, "
-                    f"detectability_ori: {torch.mean(torch.stack(all_rewards_detectability_ori)).item():.4f}, "
-                    f"detectability_wm: {torch.mean(torch.stack(all_rewards_detectability_wm)).item():.4f}, "
-                    f"detectability_pos: {torch.mean(torch.stack(all_rewards_detectability_pos)).item():.4f}, "
-                    f"detectability_neg: {torch.mean(torch.stack(all_rewards_detectability_neg)).item():.4f}"
+                    f"detect_overall: {torch.mean(torch.stack(all_rewards_detect)).item():.4f}, "
+                    f"detect_ori: {torch.mean(torch.stack(all_rewards_detect_ori)).item():.4f}, "
+                    f"detect_wm: {torch.mean(torch.stack(all_rewards_detect_wm)).item():.4f}, "
+                    f"detect_para: {torch.mean(torch.stack(all_rewards_detect_para)).item():.4f}, "
+                    f"detect_senti: {torch.mean(torch.stack(all_rewards_detect_senti)).item():.4f}"
+                    f"detect_senti_latter: {torch.mean(torch.stack(all_rewards_detect_senti_latter)).item():.4f}, "
+                    f"detect_hate: {torch.mean(torch.stack(all_rewards_detect_hate)).item():.4f}, "
                 )
                 wandb.log({
-                    "relevance_scores": np.mean(all_rewards_relevance),
-                    "text_quality_scores": np.mean(all_rewards_text_quality),
-                    "detectability_overall": torch.mean(torch.stack(all_rewards_detectability)).item(),
-                    "detectability_ori": torch.mean(torch.stack(all_rewards_detectability_ori)).item(),
-                    "detectability_wm": torch.mean(torch.stack(all_rewards_detectability_wm)).item(),
-                    "detectability_pos": torch.mean(torch.stack(all_rewards_detectability_pos)).item(),
-                    "detectability_neg": torch.mean(torch.stack(all_rewards_detectability_neg)).item(),
-                })  # , step=global_step
+                    "train/relevance_scores": np.mean(all_rewards_relevance),
+                    "train/text_quality_scores": np.mean(all_rewards_text_quality),
+                    "train/detect_overall": torch.mean(torch.stack(all_rewards_detect)).item(),
+                    "train/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
+                    "train/detect_wm": torch.mean(torch.stack(all_rewards_detect_wm)).item(),
+                    "train/detect_para": torch.mean(torch.stack(all_rewards_detect_para)).item(),
+                    "train/detect_senti": torch.mean(torch.stack(all_rewards_detect_senti)).item(),
+                    "train/detect_senti_latter": torch.mean(torch.stack(all_rewards_detect_senti_latter)).item(),
+                    "train/detect_hate": torch.mean(torch.stack(all_rewards_detect_hate)).item(),
+                    #==========debug======== #
+                    "train/success_rate_para": np.mean(all_success_para),
+                    "train/success_rate_senti": np.mean(all_success_senti),
+                    "train/success_rate_senti_latter": np.mean(all_success_senti_latter),
+                    "train/success_rate_hate": np.mean(all_success_hate),
+                }, step=global_step)
 
             b_logprobs = all_logprobs  # [B, G, seq_len_i]
             b_rewards = torch.tensor(all_rewards)  # [B, G]
@@ -471,15 +520,14 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 mb_original_text = [batch['original'][idx] for idx in mb_inds]  # [mb_size]
-                mb_watermarked_text = [all_watermarked_text[idx] for idx in mb_inds]  # [mb_size, G]
+                mb_watermarked_text_ids = [all_watermarked_text_ids[idx] for idx in mb_inds]  # [mb_size, G]
                 mb_logprobs = [b_logprobs[idx] for idx in mb_inds]  # [mb_size, G, seq_len_i]
                 mb_advantages = b_advantages[mb_inds]  # [mb_size, G]
 
                 new_mb_logprobs = []  # [mb_size, G, seq_len_i]
-                for original_text, watermarked_texts in zip(mb_original_text, mb_watermarked_text):
-                    new_logprobs = actor.get_per_token_logps(original_text, watermarked_texts)  # [G, seq_len_i]
+                for original_text, watermarked_texts_ids in zip(mb_original_text, mb_watermarked_text_ids):
+                    new_logprobs = actor.get_per_token_logps(original_text, watermarked_texts_ids)  # [G, seq_len_i]
                     new_logprobs = new_logprobs  # [G, seq_len_i]
-                    # new_logprobs = [torch.tensor(lg) for lg in new_logprobs]  # [G, seq_len_i]
                     new_mb_logprobs.append(new_logprobs)
                 
                 loss, total_output_len = 0, 0
@@ -501,7 +549,7 @@ if __name__ == "__main__":
                         total_output_len += len(new_logprobs)
                 
                 loss /= total_output_len  # average over the total output length
-                wandb.log({"loss": loss.item()})
+                wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -511,10 +559,5 @@ if __name__ == "__main__":
                 global_step += 1
 
                 # TRY NOT TO MODIFY: record rewards for plotting purposes
-                writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-                writer.add_scalar("losses/policy_loss", loss.item(), global_step)
+                # writer.add_scalar("learning_rate", optimizer.param_groups[0]["lr"], global_step)
                 print("Step:", global_step, "loss:", loss.item())
-                # print("SPS:", int(global_step / (time.time() - start_time)))
-                # writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
-    writer.close()
