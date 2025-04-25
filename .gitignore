@@ -133,3 +133,4 @@ dmypy.json
 .venv-cu11
 wandb
 runs
+outputs

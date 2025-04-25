@@ -306,82 +306,81 @@ class Actor(nn.Module):
         ## fill in the None values
         relevance_scores_filled = fill_na(relevance_scores)
         text_quality_scores_filled = fill_na(text_quality_scores)
-        ## normalize the scores
-        relevance_scores_normalized = (relevance_scores_filled - np.min(relevance_scores_filled)) / (np.max(relevance_scores_filled) - np.min(relevance_scores_filled) + 1e-8)
-        text_quality_scores_normalized = (text_quality_scores_filled - np.min(text_quality_scores_filled)) / (np.max(text_quality_scores_filled) - np.min(text_quality_scores_filled) + 1e-8)
+        # ## normalize the scores
+        # relevance_scores_normalized = (relevance_scores_filled - np.min(relevance_scores_filled)) / (np.max(relevance_scores_filled) - np.min(relevance_scores_filled) + 1e-8)
+        # text_quality_scores_normalized = (text_quality_scores_filled - np.min(text_quality_scores_filled)) / (np.max(text_quality_scores_filled) - np.min(text_quality_scores_filled) + 1e-8)
 
-        # detectability
-        detect_ori, detect_wm = [], []
-        detect_para, detect_senti, detect_senti_latter, detect_hate = [], [], [], []
+        # # detectability
+        # detect_ori, detect_wm = [], []
+        # detect_para, detect_senti, detect_senti_latter, detect_hate = [], [], [], []
         
-        original_score = self.detect(data['original'])
-        detect_ori.append(original_score)
-        for wm_text in watermarked_texts:
-            # detect
-            wm_score = self.detect(wm_text)
-            detect_wm.append(wm_score)
+        # original_score = self.detect(data['original'])
+        # detect_ori.append(original_score)
+        # for wm_text in watermarked_texts:
+        #     # detect
+        #     wm_score = self.detect(wm_text)
+        #     detect_wm.append(wm_score)
 
-            # paraphrase attack (may fail)
-            para_wm_text = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
-            para_wm_score = self.detect(para_wm_text)
-            detect_para.append(para_wm_score)
+        #     # paraphrase attack (may fail)
+        #     para_wm_text = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
+        #     para_wm_score = self.detect(para_wm_text)
+        #     detect_para.append(para_wm_score)
 
-            # sentiment spoofing attack (may fail)
-            senti_result_dict = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
-            senti_wm_text = senti_result_dict['spoofing_watermarked_text']
-            senti_wm_score = self.detect(senti_wm_text)
-            detect_senti.append(senti_wm_score)
+        #     # sentiment spoofing attack (may fail)
+        #     senti_result_dict = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
+        #     senti_wm_text = senti_result_dict['spoofing_watermarked_text']
+        #     senti_wm_score = self.detect(senti_wm_text)
+        #     detect_senti.append(senti_wm_score)
 
-            # latter sentiment spoofing attack (may fail)
-            original_sentiment = senti_result_dict['original_sentiment']
-            target_modified_sentiment = senti_result_dict['target_modified_sentiment']
-            latter_senti_result_dict = latter_spoofing_attack(wm_text, original_sentiment, target_modified_sentiment, max_call=1, model='gpt-4o')
-            latter_senti_wm_text = latter_senti_result_dict['latter_spoofing_watermarked_text']
-            latter_senti_wm_score = self.detect(latter_senti_wm_text)
-            detect_senti_latter.append(latter_senti_wm_score)
+        #     # latter sentiment spoofing attack (may fail)
+        #     original_sentiment = senti_result_dict['original_sentiment']
+        #     target_modified_sentiment = senti_result_dict['target_modified_sentiment']
+        #     latter_senti_result_dict = latter_spoofing_attack(wm_text, original_sentiment, target_modified_sentiment, max_call=1, model='gpt-4o')
+        #     latter_senti_wm_text = latter_senti_result_dict['latter_spoofing_watermarked_text']
+        #     latter_senti_wm_score = self.detect(latter_senti_wm_text)
+        #     detect_senti_latter.append(latter_senti_wm_score)
 
-            # hate spoofing attack
-            hate_wm_text = hate_attack(self.hate_phrases_list, wm_text)
-            hate_wm_score = self.detect(hate_wm_text)
-            detect_hate.append(hate_wm_score)
+        #     # hate spoofing attack
+        #     hate_wm_text = hate_attack(self.hate_phrases_list, wm_text)
+        #     hate_wm_score = self.detect(hate_wm_text)
+        #     detect_hate.append(hate_wm_score)
 
-        ## fill in the None values
-        detect_para_filled = fill_na(detect_para)
-        detect_senti_filled = fill_na(detect_senti)
-        detect_senti_latter_filled = fill_na(detect_senti_latter)
-        # gather the detectability scores
-        d1, d2 = [], []
-        for d_wm in detect_wm:
-            tmp = - detect_ori[0] + d_wm
-            d1.append(tmp.item())
-        for d_para, d_senti, d_senti_latter, d_hate in zip(detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
-            d_neg = (d_senti + d_senti_latter + d_hate.item()) / 3
-            d2.append(+ d_para - d_neg)
-        ## normalize the scores
-        d1_normalized = (d1 - np.min(d1)) / (np.max(d1) - np.min(d1) + 1e-8)
-        d2_normalized = (d2 - np.min(d2)) / (np.max(d2) - np.min(d2) + 1e-8)
+        # ## fill in the None values
+        # detect_para_filled = fill_na(detect_para)
+        # detect_senti_filled = fill_na(detect_senti)
+        # detect_senti_latter_filled = fill_na(detect_senti_latter)
+        # # gather the detectability scores
+        # d1, d2 = [], []
+        # for d_wm in detect_wm:
+        #     tmp = - detect_ori[0] + d_wm
+        #     d1.append(tmp.item())
+        # for d_para, d_senti, d_senti_latter, d_hate in zip(detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
+        #     d_neg = (d_senti + d_senti_latter + d_hate.item()) / 3
+        #     d2.append(+ d_para - d_neg)
+        # ## normalize the scores
+        # d1_normalized = (d1 - np.min(d1)) / (np.max(d1) - np.min(d1) + 1e-8)
+        # d2_normalized = (d2 - np.min(d2)) / (np.max(d2) - np.min(d2) + 1e-8)
 
         # overall reward
         rewards = []
-        for d1, d2, r, q in zip(d1_normalized, d2_normalized, relevance_scores_normalized, text_quality_scores_normalized):
-            reward = d1 + d2 + r + q
+        for r, q in zip(relevance_scores_filled, text_quality_scores_filled):
+            reward = r + q
             rewards.append(reward)
 
-        G = len(watermarked_texts)  # debug
         result_dict = {
             'rewards': rewards,
             'relevance_scores': [s for s in relevance_scores if s is not None],
             'text_quality_scores': [s for s in text_quality_scores if s is not None],
-            'detect_ori': detect_ori,
-            'detect_wm': detect_wm,
-            'detect_para': [d for d in detect_para if d is not None],
-            'detect_senti': [d for d in detect_senti if d is not None],
-            'detect_senti_latter': [d for d in detect_senti_latter if d is not None],
-            'detect_hate': [d for d in detect_hate if d is not None],
-            # =======debug======== #
-            'sucess_para': len([d for d in detect_para if d is not None]) / G,
-            'sucess_senti': len([d for d in detect_senti if d is not None]) / G,
-            'sucess_senti_latter': len([d for d in detect_senti_latter if d is not None]) / G,
+            # 'detect_ori': detect_ori,
+            # 'detect_wm': detect_wm,
+            # 'detect_para': [d for d in detect_para if d is not None],
+            # 'detect_senti': [d for d in detect_senti if d is not None],
+            # 'detect_senti_latter': [d for d in detect_senti_latter if d is not None],
+            # 'detect_hate': [d for d in detect_hate if d is not None],
+            # # =======debug======== #
+            # 'sucess_para': len([d for d in detect_para if d is not None]) / G,
+            # 'sucess_senti': len([d for d in detect_senti if d is not None]) / G,
+            # 'sucess_senti_latter': len([d for d in detect_senti_latter if d is not None]) / G,
         }
 
         return result_dict
@@ -394,7 +393,7 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-V2"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-sanity-quality"
 
     if args.track:
         import wandb
@@ -452,11 +451,11 @@ if __name__ == "__main__":
             
             ## compute rewards
             all_rewards = []  # [B, G]
-            all_rewards_relevance, all_rewards_text_quality, all_rewards_detect = [], [], []  # [B*G]
-            all_rewards_detect_ori, all_rewards_detect_wm = [], []
-            all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
-            # ==========debug======== #
-            all_success_para, all_success_senti, all_success_senti_latter = [], [], []
+            all_rewards_relevance, all_rewards_text_quality = [], []  # [B*G]
+            # all_rewards_detect_ori, all_rewards_detect_wm = [], []
+            # all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
+            # # ==========debug======== #
+            # all_success_para, all_success_senti, all_success_senti_latter = [], [], []
             for data_idx in tqdm(range(len(batch['original'])), desc="Computing rewards"):
                 data = {k: batch[k][data_idx] for k in batch.keys()}
                 watermarked_texts = all_watermarked_texts[data_idx]
@@ -465,16 +464,16 @@ if __name__ == "__main__":
                 all_rewards.append(result_dict['rewards'])
                 all_rewards_relevance.extend(result_dict['relevance_scores'])
                 all_rewards_text_quality.extend(result_dict['text_quality_scores'])
-                all_rewards_detect_ori.extend(result_dict['detect_ori'])
-                all_rewards_detect_wm.extend(result_dict['detect_wm'])
-                all_rewards_detect_para.extend(result_dict['detect_para'])
-                all_rewards_detect_senti.extend(result_dict['detect_senti'])
-                all_rewards_detect_senti_latter.extend(result_dict['detect_senti_latter'])
-                all_rewards_detect_hate.extend(result_dict['detect_hate'])
-                # ==========debug======== #
-                all_success_para.append(result_dict['sucess_para'])
-                all_success_senti.append(result_dict['sucess_senti'])
-                all_success_senti_latter.append(result_dict['sucess_senti_latter'])
+                # all_rewards_detect_ori.extend(result_dict['detect_ori'])
+                # all_rewards_detect_wm.extend(result_dict['detect_wm'])
+                # all_rewards_detect_para.extend(result_dict['detect_para'])
+                # all_rewards_detect_senti.extend(result_dict['detect_senti'])
+                # all_rewards_detect_senti_latter.extend(result_dict['detect_senti_latter'])
+                # all_rewards_detect_hate.extend(result_dict['detect_hate'])
+                # # ==========debug======== #
+                # all_success_para.append(result_dict['sucess_para'])
+                # all_success_senti.append(result_dict['sucess_senti'])
+                # all_success_senti_latter.append(result_dict['sucess_senti_latter'])
 
             if global_step != -1:
                 # record detailed rewards
@@ -482,31 +481,31 @@ if __name__ == "__main__":
                     f"Step: {global_step}, "
                     f"relevance: {np.mean(all_rewards_relevance):.4f}, "
                     f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
-                    f"detect_ori: {torch.mean(torch.stack(all_rewards_detect_ori)).item():.4f}, "
-                    f"detect_wm: {torch.mean(torch.stack(all_rewards_detect_wm)).item():.4f}, "
-                    f"detect_para: {torch.mean(torch.stack(all_rewards_detect_para)).item():.4f}, "
-                    f"detect_senti: {torch.mean(torch.stack(all_rewards_detect_senti)).item():.4f}, "
-                    f"detect_senti_latter: {torch.mean(torch.stack(all_rewards_detect_senti_latter)).item():.4f}, "
-                    f"detect_hate: {torch.mean(torch.stack(all_rewards_detect_hate)).item():.4f}, "
+                    # f"detect_ori: {torch.mean(torch.stack(all_rewards_detect_ori)).item():.4f}, "
+                    # f"detect_wm: {torch.mean(torch.stack(all_rewards_detect_wm)).item():.4f}, "
+                    # f"detect_para: {torch.mean(torch.stack(all_rewards_detect_para)).item():.4f}, "
+                    # f"detect_senti: {torch.mean(torch.stack(all_rewards_detect_senti)).item():.4f}, "
+                    # f"detect_senti_latter: {torch.mean(torch.stack(all_rewards_detect_senti_latter)).item():.4f}, "
+                    # f"detect_hate: {torch.mean(torch.stack(all_rewards_detect_hate)).item():.4f}, "
                     , flush=True
                 )
                 wandb.log({
                     "train/reward/relevance_scores": np.mean(all_rewards_relevance),
                     "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
-                    "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
-                    "train/reward/detect_wm": torch.mean(torch.stack(all_rewards_detect_wm)).item(),
-                    "train/reward/detect_para": torch.mean(torch.stack(all_rewards_detect_para)).item(),
-                    "train/reward/detect_senti": torch.mean(torch.stack(all_rewards_detect_senti)).item(),
-                    "train/reward/detect_senti_latter": torch.mean(torch.stack(all_rewards_detect_senti_latter)).item(),
-                    "train/reward/detect_hate": torch.mean(torch.stack(all_rewards_detect_hate)).item(),
-                    #==========debug======== #
-                    "train/success_rate_para": np.mean(all_success_para),
-                    "train/success_rate_senti": np.mean(all_success_senti),
-                    "train/success_rate_senti_latter": np.mean(all_success_senti_latter),
+                    # "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
+                    # "train/reward/detect_wm": torch.mean(torch.stack(all_rewards_detect_wm)).item(),
+                    # "train/reward/detect_para": torch.mean(torch.stack(all_rewards_detect_para)).item(),
+                    # "train/reward/detect_senti": torch.mean(torch.stack(all_rewards_detect_senti)).item(),
+                    # "train/reward/detect_senti_latter": torch.mean(torch.stack(all_rewards_detect_senti_latter)).item(),
+                    # "train/reward/detect_hate": torch.mean(torch.stack(all_rewards_detect_hate)).item(),
+                    # #==========debug======== #
+                    # "train/success_rate_para": np.mean(all_success_para),
+                    # "train/success_rate_senti": np.mean(all_success_senti),
+                    # "train/success_rate_senti_latter": np.mean(all_success_senti_latter),
                 }, step=global_step)
 
             b_logprobs = all_logprobs  # [B, G, seq_len_i]
-            b_rewards = torch.tensor(all_rewards)  # [B, G]
+            b_rewards = torch.tensor(all_rewards, dtype=torch.float32)  # [B, G]
 
             # normalize rewards to get advantages
             mean = b_rewards.mean(dim=1, keepdim=True)
