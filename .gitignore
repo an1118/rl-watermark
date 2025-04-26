@@ -134,3 +134,4 @@ dmypy.json
 wandb
 runs
 outputs
+ckpts

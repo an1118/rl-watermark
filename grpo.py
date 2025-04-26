@@ -88,6 +88,8 @@ class Args:
     # to be filled in runtime
     minibatch_size: int = 0
     """the mini-batch size (computed in runtime)"""
+    checkpoint_dir: str = None
+    """where to save best embed_map_model checkpoints"""
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -395,6 +397,11 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-sanity-quality"
 
+    # make checkpoint dir and init best reward
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-sanity-quality"
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    best_mean_reward = float("-inf")  # track best
+
     if args.track:
         import wandb
 
@@ -475,6 +482,18 @@ if __name__ == "__main__":
                 # all_success_senti.append(result_dict['sucess_senti'])
                 # all_success_senti_latter.append(result_dict['sucess_senti_latter'])
 
+            ## save checkpoint with best reward
+            if global_step >0:
+                flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
+                mean_reward = np.mean(flat_rews)
+                if mean_reward > best_mean_reward:
+                    best_mean_reward = mean_reward
+                    ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
+                    # save the embed_map model + tokenizer
+                    actor.embed_map_model.save_pretrained(ckpt_path)
+                    actor.embed_map_tokenizer.save_pretrained(ckpt_path)
+                    print(f"[Checkpoint] new best mean reward {mean_reward:.4f}, saved to {ckpt_path} after step {global_step}")
+                
             if global_step != -1:
                 # record detailed rewards
                 print(
