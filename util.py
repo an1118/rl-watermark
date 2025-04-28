@@ -101,10 +101,6 @@ def sign_ste(x):
     return x + x.sign() - x_nogradient
 
 
-def safe(t, device):
-    return t if t is not None else torch.tensor(0.0, device=device)
-
-
 def fill_na(values):
     if all(v is None for v in values):
         return [0.0] * len(values)

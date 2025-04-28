@@ -18,7 +18,7 @@ from vllm import LLM, SamplingParams
 from datasets import load_dataset
 
 from models_cl import RobertaForCL
-from util import vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, sign_ste, watermark_logits_bias, safe, fill_na
+from util import vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, sign_ste, watermark_logits_bias, fill_na
 from text_quality_score import _judge_text_quality
 from attack import paraphrase_attack, spoofing_attack, latter_spoofing_attack, hate_attack
 
@@ -380,6 +380,8 @@ class Actor(nn.Module):
             # 'detect_senti_latter': [d for d in detect_senti_latter if d is not None],
             # 'detect_hate': [d for d in detect_hate if d is not None],
             # # =======debug======== #
+            'sucess_relevance': len([d for d in relevance_scores if d is not None]) / len(relevance_scores),
+            'sucess_text_quality': len([d for d in text_quality_scores if d is not None]) / len(text_quality_scores),
             # 'sucess_para': len([d for d in detect_para if d is not None]) / G,
             # 'sucess_senti': len([d for d in detect_senti if d is not None]) / G,
             # 'sucess_senti_latter': len([d for d in detect_senti_latter if d is not None]) / G,
@@ -462,6 +464,7 @@ if __name__ == "__main__":
             # all_rewards_detect_ori, all_rewards_detect_wm = [], []
             # all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
             # # ==========debug======== #
+            all_success_relevance, all_success_text_quality = [], []
             # all_success_para, all_success_senti, all_success_senti_latter = [], [], []
             for data_idx in tqdm(range(len(batch['original'])), desc="Computing rewards"):
                 data = {k: batch[k][data_idx] for k in batch.keys()}
@@ -478,6 +481,8 @@ if __name__ == "__main__":
                 # all_rewards_detect_senti_latter.extend(result_dict['detect_senti_latter'])
                 # all_rewards_detect_hate.extend(result_dict['detect_hate'])
                 # # ==========debug======== #
+                all_success_relevance.append(result_dict['sucess_relevance'])
+                all_success_text_quality.append(result_dict['sucess_text_quality'])
                 # all_success_para.append(result_dict['sucess_para'])
                 # all_success_senti.append(result_dict['sucess_senti'])
                 # all_success_senti_latter.append(result_dict['sucess_senti_latter'])
@@ -518,6 +523,8 @@ if __name__ == "__main__":
                     # "train/reward/detect_senti_latter": torch.mean(torch.stack(all_rewards_detect_senti_latter)).item(),
                     # "train/reward/detect_hate": torch.mean(torch.stack(all_rewards_detect_hate)).item(),
                     # #==========debug======== #
+                    "train/success_rate_relevance": np.mean(all_success_relevance),
+                    "train/success_rate_text_quality": np.mean(all_success_text_quality),
                     # "train/success_rate_para": np.mean(all_success_para),
                     # "train/success_rate_senti": np.mean(all_success_senti),
                     # "train/success_rate_senti_latter": np.mean(all_success_senti_latter),
