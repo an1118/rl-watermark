@@ -295,22 +295,22 @@ class Actor(nn.Module):
         Returns:
             list: A list of computed reward values for each watermarked_text.
         """
-        # relevance & text quality
-        relevance_scores, text_quality_scores = [], []
-        for watermarked_text in watermarked_texts:
-            text_quality, relevance = None, None
-            quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o')
-            if quality_result_dict:
-                text_quality = quality_result_dict['Text quality']
-                relevance = quality_result_dict['Relevance']
-            relevance_scores.append(relevance)
-            text_quality_scores.append(text_quality)
-        ## fill in the None values
-        relevance_scores_filled = fill_na(relevance_scores)
-        text_quality_scores_filled = fill_na(text_quality_scores)
-        ## normalize the scores
-        relevance_scores_normalized = (relevance_scores_filled - np.min(relevance_scores_filled)) / (np.max(relevance_scores_filled) - np.min(relevance_scores_filled) + 1e-8)
-        text_quality_scores_normalized = (text_quality_scores_filled - np.min(text_quality_scores_filled)) / (np.max(text_quality_scores_filled) - np.min(text_quality_scores_filled) + 1e-8)
+        # # relevance & text quality
+        # relevance_scores, text_quality_scores = [], []
+        # for watermarked_text in watermarked_texts:
+        #     text_quality, relevance = None, None
+        #     quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o')
+        #     if quality_result_dict:
+        #         text_quality = quality_result_dict['Text quality']
+        #         relevance = quality_result_dict['Relevance']
+        #     relevance_scores.append(relevance)
+        #     text_quality_scores.append(text_quality)
+        # ## fill in the None values
+        # relevance_scores_filled = fill_na(relevance_scores)
+        # text_quality_scores_filled = fill_na(text_quality_scores)
+        # ## normalize the scores
+        # relevance_scores_normalized = (relevance_scores_filled - np.min(relevance_scores_filled)) / (np.max(relevance_scores_filled) - np.min(relevance_scores_filled) + 1e-8)
+        # text_quality_scores_normalized = (text_quality_scores_filled - np.min(text_quality_scores_filled)) / (np.max(text_quality_scores_filled) - np.min(text_quality_scores_filled) + 1e-8)
 
         # detectability
         detect_ori, detect_wm = [], []
@@ -365,15 +365,15 @@ class Actor(nn.Module):
 
         # overall reward
         rewards = []
-        for d1, d2, r, q in zip(d1_normalized, d2_normalized, relevance_scores_normalized, text_quality_scores_normalized):
-            reward = d1 + d2 + r + q
+        for d1, d2 in zip(d1_normalized, d2_normalized):
+            reward = d1 + d2
             rewards.append(reward)
 
         G = len(watermarked_texts)  # debug
         result_dict = {
             'rewards': rewards,
-            'relevance_scores': [s for s in relevance_scores if s is not None],
-            'text_quality_scores': [s for s in text_quality_scores if s is not None],
+            # 'relevance_scores': [s for s in relevance_scores if s is not None],
+            # 'text_quality_scores': [s for s in text_quality_scores if s is not None],
             'detect_ori': detect_ori,
             'detect_wm': detect_wm,
             'detect_para': [d for d in detect_para if d is not None],
@@ -396,12 +396,15 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-V2"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-V2"
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     best_mean_reward = float("-inf")  # track best
+
+    print(f"Run name: {run_name}")
+    print(f"Checkpoint directory: {args.checkpoint_dir}")
 
     if args.track:
         import wandb
@@ -459,7 +462,7 @@ if __name__ == "__main__":
             
             ## compute rewards
             all_rewards = []  # [B, G]
-            all_rewards_relevance, all_rewards_text_quality, all_rewards_detect = [], [], []  # [B*G]
+            all_rewards_detect = []  # [B*G]
             all_rewards_detect_ori, all_rewards_detect_wm = [], []
             all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
             # ==========debug======== #
@@ -470,8 +473,8 @@ if __name__ == "__main__":
 
                 result_dict = actor.compute_rewards(data, watermarked_texts)  # [G]
                 all_rewards.append(result_dict['rewards'])
-                all_rewards_relevance.extend(result_dict['relevance_scores'])
-                all_rewards_text_quality.extend(result_dict['text_quality_scores'])
+                # all_rewards_relevance.extend(result_dict['relevance_scores'])
+                # all_rewards_text_quality.extend(result_dict['text_quality_scores'])
                 all_rewards_detect_ori.extend(result_dict['detect_ori'])
                 all_rewards_detect_wm.extend(result_dict['detect_wm'])
                 all_rewards_detect_para.extend(result_dict['detect_para'])
@@ -499,8 +502,8 @@ if __name__ == "__main__":
                 # record detailed rewards
                 print(
                     f"Step: {global_step}, "
-                    f"relevance: {np.mean(all_rewards_relevance):.4f}, "
-                    f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
+                    # f"relevance: {np.mean(all_rewards_relevance):.4f}, "
+                    # f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
                     f"detect_ori: {torch.mean(torch.stack(all_rewards_detect_ori)).item():.4f}, "
                     f"detect_wm: {torch.mean(torch.stack(all_rewards_detect_wm)).item():.4f}, "
                     f"detect_para: {torch.mean(torch.stack(all_rewards_detect_para)).item():.4f}, "
@@ -510,8 +513,8 @@ if __name__ == "__main__":
                     , flush=True
                 )
                 wandb.log({
-                    "train/reward/relevance_scores": np.mean(all_rewards_relevance),
-                    "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
+                    # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
+                    # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
                     "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
                     "train/reward/detect_wm": torch.mean(torch.stack(all_rewards_detect_wm)).item(),
                     "train/reward/detect_para": torch.mean(torch.stack(all_rewards_detect_para)).item(),
