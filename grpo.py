@@ -43,7 +43,7 @@ class Args:
     # GRPO training arguments
     num_iterations: int = 200
     """the number of iterations (computed in runtime)"""
-    batch_size: int = 16  # 16
+    batch_size: int = 2  # 16  # TODO
     """the batch size"""
     num_minibatches: int = 2  # 1
     """the number of mini-batches"""
@@ -363,23 +363,40 @@ class Actor(nn.Module):
         detect_para_filled = fill_na(detect_para)
         detect_senti_filled = fill_na(detect_senti)
         detect_senti_latter_filled = fill_na(detect_senti_latter)
-        # gather the detectability scores
-        d1, d2 = [], []
-        for d_wm in detect_wm:
-            tmp = - detect_ori[0] + d_wm
-            d1.append(tmp.item())
-        for d_para, d_senti, d_senti_latter, d_hate in zip(detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
-            d_neg = (d_senti + d_senti_latter + d_hate.item()) / 3
-            d2.append(+ d_para - d_neg)
-        ## normalize the scores
-        d1_normalized = (d1 - np.min(d1)) / (np.max(d1) - np.min(d1) + 1e-8)
-        d2_normalized = (d2 - np.min(d2)) / (np.max(d2) - np.min(d2) + 1e-8)
 
-        # overall reward
-        rewards = []
-        for d1, d2 in zip(d1_normalized, d2_normalized):
-            reward = d1 + d2
-            rewards.append(reward)
+        # gather the detectability scores
+        threshold_wm = 0.19  # TODO
+        threshold_para = 0.04
+        threshold_senti = 0.01
+        threshold_latter = 0.03
+        threshold_hate = 0.02
+
+        def reward_should_detect(score, original_score, threshold):
+            if (score - original_score).item() < threshold:
+                return 0
+            return 1
+
+        def reward_should_not_detect(score, original_score, threshold):
+            if (original_score - score).item() < threshold:
+                return 0
+            return 1
+
+        detect_overall = []
+        for d_ori, d_wm, d_para, d_senti, d_senti_latter, d_hate in zip(detect_ori * len(detect_wm), detect_wm, detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
+            r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
+            r_para = reward_should_detect(d_para, d_ori, threshold_para)
+
+            r_senti = reward_should_not_detect(d_senti, d_ori, threshold_senti)
+            r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
+            r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
+
+            detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
+
+        ## normalize the overall detection scores
+        detect_overall = np.array(detect_overall)
+        detect_overall = (detect_overall - np.min(detect_overall)) / (np.max(detect_overall) - np.min(detect_overall) + 1e-8)
+
+        rewards = detect_overall
 
         G = len(watermarked_texts)  # debug
         result_dict = {
@@ -408,10 +425,10 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack-binary"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack-binary"
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     best_mean_reward = float("-inf")  # track best
 
@@ -540,7 +557,7 @@ if __name__ == "__main__":
                 }, step=global_step)
 
             b_logprobs = all_logprobs  # [B, G, seq_len_i]
-            b_rewards = torch.tensor(all_rewards)  # [B, G]
+            b_rewards = torch.tensor(all_rewards, dtype=torch.float32)  # [B, G]
 
             # normalize rewards to get advantages
             mean = b_rewards.mean(dim=1, keepdim=True)
