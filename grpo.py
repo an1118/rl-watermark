@@ -43,7 +43,7 @@ class Args:
     # GRPO training arguments
     num_iterations: int = 200
     """the number of iterations (computed in runtime)"""
-    batch_size: int = 2  # 16  # TODO
+    batch_size: int = 16  # 16  # TODO
     """the batch size"""
     num_minibatches: int = 2  # 1
     """the number of mini-batches"""
@@ -514,6 +514,10 @@ if __name__ == "__main__":
                 all_success_para.append(result_dict['sucess_para'])
                 all_success_senti.append(result_dict['sucess_senti'])
                 all_success_senti_latter.append(result_dict['sucess_senti_latter'])
+                # Calculate the ratio of groups having all zero elements
+                zero_rewards_ratio = sum(np.all(r == 0) for r in all_rewards) / len(all_rewards)
+                # Calculate the ratio of groups having all one elements
+                one_rewards_ratio = sum(np.all(r == 1) for r in all_rewards) / len(all_rewards)
 
             ## save checkpoint with best reward
             if global_step >0:
@@ -554,6 +558,8 @@ if __name__ == "__main__":
                     "train/success_rate_para": np.mean(all_success_para),
                     "train/success_rate_senti": np.mean(all_success_senti),
                     "train/success_rate_senti_latter": np.mean(all_success_senti_latter),
+                    "train/zero_rewards_ratio": zero_rewards_ratio,
+                    "train/one_rewards_ratio": one_rewards_ratio,
                 }, step=global_step)
 
             b_logprobs = all_logprobs  # [B, G, seq_len_i]
