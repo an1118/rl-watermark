@@ -546,6 +546,7 @@ if __name__ == "__main__":
                     , flush=True
                 )
                 wandb.log({
+                    "train/overall_reward": np.mean(flat_rews),
                     # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
                     # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
                     "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
