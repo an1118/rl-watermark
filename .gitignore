@@ -137,6 +137,8 @@ outputs
 ckpts
 utils
 
+api.py
+run.sh
 run_watermark.sh
 watermark_end2end.py
 watermark_util.py
