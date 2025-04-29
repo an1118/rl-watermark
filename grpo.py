@@ -409,10 +409,10 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_para"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack"
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_para"
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     best_mean_reward = float("-inf")  # track best
 
@@ -526,6 +526,7 @@ if __name__ == "__main__":
                     , flush=True
                 )
                 wandb.log({
+                    "train/overall_reward": np.mean(flat_rews),
                     # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
                     # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
                     "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
