@@ -520,9 +520,9 @@ if __name__ == "__main__":
                 one_rewards_ratio = sum(np.all(r == 1) for r in all_rewards) / len(all_rewards)
 
             ## save checkpoint with best reward
+            flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
+            mean_reward = np.mean(flat_rews)
             if global_step >0:
-                flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
-                mean_reward = np.mean(flat_rews)
                 if mean_reward > best_mean_reward:
                     best_mean_reward = mean_reward
                     ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
