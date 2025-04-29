@@ -500,9 +500,9 @@ if __name__ == "__main__":
                 # all_success_senti_latter.append(result_dict['sucess_senti_latter'])
 
             ## save checkpoint with best reward
+            flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
+            mean_reward = np.mean(flat_rews)
             if global_step >0:
-                flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
-                mean_reward = np.mean(flat_rews)
                 if mean_reward > best_mean_reward:
                     best_mean_reward = mean_reward
                     ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
