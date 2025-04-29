@@ -12,3 +12,5 @@ tyro
 tensorboard
 vllm
 notebook
+matplotlib
+scikit-learn

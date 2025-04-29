@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -318,34 +319,45 @@ class Actor(nn.Module):
         
         original_score = self.detect(data['original'])
         detect_ori.append(original_score)
-        for wm_text in watermarked_texts:
-            # detect
-            wm_score = self.detect(wm_text)
-            detect_wm.append(wm_score)
+        # helper to run all attacks for one wm_text
+        def run_attacks(wm_text):
+            out = {}
+            out['wm'] = self.detect(wm_text)
 
-            # paraphrase attack (may fail)
-            para_wm_text = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
-            para_wm_score = self.detect(para_wm_text)
-            detect_para.append(para_wm_score)
+            # paraphrase
+            para = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
+            out['para'] = self.detect(para) if para else None
 
-            # sentiment spoofing attack (may fail)
-            senti_result_dict = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
-            senti_wm_text = senti_result_dict['spoofing_watermarked_text']
-            senti_wm_score = self.detect(senti_wm_text)
-            detect_senti.append(senti_wm_score)
+            # sentiment spoof
+            senti_res = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
+            senti = senti_res.get('spoofing_watermarked_text')
+            out['senti'] = self.detect(senti) if senti else None
 
-            # latter sentiment spoofing attack (may fail)
-            original_sentiment = senti_result_dict['original_sentiment']
-            target_modified_sentiment = senti_result_dict['target_modified_sentiment']
-            latter_senti_result_dict = latter_spoofing_attack(wm_text, original_sentiment, target_modified_sentiment, max_call=1, model='gpt-4o')
-            latter_senti_wm_text = latter_senti_result_dict['latter_spoofing_watermarked_text']
-            latter_senti_wm_score = self.detect(latter_senti_wm_text)
-            detect_senti_latter.append(latter_senti_wm_score)
+            # latter sentiment spoof
+            orig_sent = senti_res.get('original_sentiment')
+            tgt_sent = senti_res.get('target_modified_sentiment')
+            latter_res = latter_spoofing_attack(
+                wm_text, orig_sent, tgt_sent, max_call=1, model='gpt-4o'
+            )
+            latter = latter_res.get('latter_spoofing_watermarked_text')
+            out['latter'] = self.detect(latter) if latter else None
 
-            # hate spoofing attack
-            hate_wm_text = hate_attack(self.hate_phrases_list, wm_text)
-            hate_wm_score = self.detect(hate_wm_text)
-            detect_hate.append(hate_wm_score)
+            # hate spoof
+            hate_t = hate_attack(self.hate_phrases_list, wm_text)
+            out['hate'] = self.detect(hate_t) if hate_t else None
+
+            return out
+
+        # run in parallel threads
+        with ThreadPoolExecutor(max_workers=min(len(watermarked_texts), 4)) as exe:
+            futures = [exe.submit(run_attacks, wm) for wm in watermarked_texts]
+            for future in as_completed(futures):
+                r = future.result()
+                detect_wm.append(r['wm'])
+                detect_para.append(r['para'])
+                detect_senti.append(r['senti'])
+                detect_senti_latter.append(r['latter'])
+                detect_hate.append(r['hate'])
 
         ## fill in the None values
         detect_para_filled = fill_na(detect_para)
