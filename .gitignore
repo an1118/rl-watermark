@@ -135,7 +135,9 @@ wandb
 runs
 outputs
 ckpts
+utils
 
 run_watermark.sh
 watermark_end2end.py
 watermark_util.py
+watermarking.py
