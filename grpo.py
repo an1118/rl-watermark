@@ -364,23 +364,17 @@ class Actor(nn.Module):
         # detect_senti_filled = fill_na(detect_senti)
         # detect_senti_latter_filled = fill_na(detect_senti_latter)
         # gather the detectability scores
-        d1, d2 = [], []
-        for d_wm in detect_wm:
-            tmp = - detect_ori[0] + d_wm
-            d1.append(tmp.item())
-        # for d_para, d_senti, d_senti_latter, d_hate in zip(detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
-        #     d_neg = (d_senti + d_senti_latter + d_hate.item()) / 3
-        #     d2.append(+ d_para - d_neg)
-        d2 = detect_para_filled
-        ## normalize the scores
-        d1_normalized = (d1 - np.min(d1)) / (np.max(d1) - np.min(d1) + 1e-8)
-        d2_normalized = (d2 - np.min(d2)) / (np.max(d2) - np.min(d2) + 1e-8)
+        detect_overall = []
+        for d_ori, d_wm, d_para in zip(
+            detect_ori * len(detect_wm),
+            detect_wm,
+            detect_para_filled,
+        ):
+            tmp = - d_ori + d_wm + d_para
+            detect_overall.append(tmp.item())
 
         # overall reward
-        rewards = []
-        for d1, d2 in zip(d1_normalized, d2_normalized):
-            reward = d1 + d2
-            rewards.append(reward)
+        rewards = detect_overall
 
         G = len(watermarked_texts)  # debug
         result_dict = {
