@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
+from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -297,16 +298,29 @@ class Actor(nn.Module):
             list: A list of computed reward values for each watermarked_text.
         """
         # relevance & text quality
+        # relevance_scores, text_quality_scores = [], []
+        # for watermarked_text in watermarked_texts:
+        #     text_quality, relevance = None, None
+        #     quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o')
+        #     if quality_result_dict:
+        #         text_quality = quality_result_dict['Text quality']
+        #         relevance = quality_result_dict['Relevance']
+        #     relevance_scores.append(relevance)
+        #     text_quality_scores.append(text_quality)
+
+        def run_quality(wm_text):
+            res = _judge_text_quality(data['original'], wm_text, model='gpt-4o')
+            if res:
+                return res.get('Text quality'), res.get('Relevance')
+            return None, None        ## fill in the None values
+
         relevance_scores, text_quality_scores = [], []
-        for watermarked_text in watermarked_texts:
-            text_quality, relevance = None, None
-            quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o')
-            if quality_result_dict:
-                text_quality = quality_result_dict['Text quality']
-                relevance = quality_result_dict['Relevance']
-            relevance_scores.append(relevance)
-            text_quality_scores.append(text_quality)
-        ## fill in the None values
+        max_workers = min(len(watermarked_texts), 4)  # tune to your rate‑limit
+        with ThreadPoolExecutor(max_workers=max_workers) as exe:
+            for tq, rel in exe.map(run_quality, watermarked_texts):
+                text_quality_scores.append(tq)
+                relevance_scores.append(rel)
+
         relevance_scores_filled = fill_na(relevance_scores)
         text_quality_scores_filled = fill_na(text_quality_scores)
         # ## normalize the scores
