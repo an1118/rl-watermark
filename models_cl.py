@@ -20,16 +20,15 @@ class ResidualBlock(nn.Module):
         return out
 
 class SemanticModel(nn.Module):
-    def __init__(self, num_layers=2, input_dim=768, hidden_dim=512, output_dim=384):
+    def __init__(self, num_layers=2, input_dim=768, hidden_dim=256, output_dim=128256):
         super(SemanticModel, self).__init__()
         
         self.layers = nn.ModuleList()
         
         self.layers.append(nn.Linear(input_dim, hidden_dim))
         
-        for _ in range(num_layers):
-            self.layers.append(ResidualBlock(hidden_dim))
-
+        self.layers.append(nn.ReLU())
+        
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, x):

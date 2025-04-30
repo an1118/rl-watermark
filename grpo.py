@@ -62,7 +62,8 @@ class Args:
     # """the target KL divergence threshold"""
 
     # Watermark specific arguments
-    embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
+    embed_map_model_name: str = "/blue/buyuheng/li_an.ucsb/projects/contrastive-watermark/contrastive_train/result/map_to_vocab_size/64batch_15epochs/llama8gpt8-sent1-latter_sent1-hate1/loss_margin0.9/checkpoint-435"
+    
     """the name of the embedding model"""
     watermark_model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
     """the name of the watermark model"""
@@ -242,7 +243,7 @@ class Actor(nn.Module):
         mapping = outputs.pooler_output.squeeze()
         mapping = sign_ste(mapping)
         mapping = (mapping + 1) / 2
-        green_red_split = mapping[self.mapping_list].clone().to(self.gpu1)
+        green_red_split = mapping
         return green_red_split
 
     def _next_token_entropy(self, logits):
@@ -488,9 +489,9 @@ if __name__ == "__main__":
                 # all_success_senti_latter.append(result_dict['sucess_senti_latter'])
 
             ## save checkpoint with best reward
+            flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
+            mean_reward = np.mean(flat_rews)
             if global_step >0:
-                flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
-                mean_reward = np.mean(flat_rews)
                 if mean_reward > best_mean_reward:
                     best_mean_reward = mean_reward
                     ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
@@ -514,6 +515,7 @@ if __name__ == "__main__":
                     , flush=True
                 )
                 wandb.log({
+                    "train/reward/overall_reward": np.mean(flat_rews),
                     "train/reward/relevance_scores": np.mean(all_rewards_relevance),
                     "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
                     # "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
