@@ -392,10 +392,6 @@ class Actor(nn.Module):
 
             detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
 
-        ## normalize the overall detection scores
-        detect_overall = np.array(detect_overall)
-        detect_overall = (detect_overall - np.min(detect_overall)) / (np.max(detect_overall) - np.min(detect_overall) + 1e-8)
-
         rewards = detect_overall
 
         G = len(watermarked_texts)  # debug
