@@ -323,7 +323,6 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o', vllm_mo
                 'modified_sentiment': None,
                 'spoofing_watermarked_text': None,
                 'spoofing_attack_output': None,
-                'final_call_spoofing_watermarked_text': None,
                 'success_spoofing': False,
             }
             return result_dict
@@ -352,7 +351,6 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o', vllm_mo
                     'modified_sentiment': modified_sentiment,
                     'spoofing_watermarked_text': spoofing_text,
                     'spoofing_attack_output': output_text,
-                    'final_call_spoofing_watermarked_text': None,
                     'success_spoofing': True,
                 }
                 return result_dict
@@ -368,7 +366,6 @@ def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o', vllm_mo
                 'modified_sentiment': modified_sentiment,
                 'spoofing_watermarked_text': None,
                 'spoofing_attack_output': output_text,
-                'final_call_spoofing_watermarked_text': spoofing_text,
                 'success_spoofing': False
             }
             return result_dict
@@ -382,7 +379,6 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
     if text_length <= 2:
         return {
                 'latter_spoofing_watermarked_text': None,
-                'final_call_latter_spoofing_watermarked_text': None,
                 'success_latter_spoofing': False,
                 }
 
@@ -419,7 +415,6 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
             print(e, flush=True)
             result_dict = {
                 'latter_spoofing_watermarked_text': None,
-                'final_call_latter_spoofing_watermarked_text': None,
                 'success_latter_spoofing': False,
             }
             return result_dict
@@ -436,7 +431,6 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
                         print('Latter spoofing attack failed!', flush=True)
                         result_dict = {
                             'latter_spoofing_watermarked_text': None,
-                            'final_call_latter_spoofing_watermarked_text': None,
                             'success_latter_spoofing': False,
                         }
                         return result_dict
@@ -457,7 +451,6 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
             if not keep_call:
                 result_dict = {
                     'latter_spoofing_watermarked_text': spoofing_text,
-                    'final_call_latter_spoofing_watermarked_text': None,
                     'success_latter_spoofing': True,
                 }
                 return result_dict
@@ -469,7 +462,6 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
             print('Latter spoofing attack failed!', flush=True)
             result_dict = {
                 'latter_spoofing_watermarked_text': None,
-                'final_call_latter_spoofing_watermarked_text': spoofing_text,
                 'success_latter_spoofing': False
             }
             return result_dict
