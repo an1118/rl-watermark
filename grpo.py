@@ -61,7 +61,7 @@ class Args:
     """the maximum norm for the gradient clipping"""
     # target_kl: float = None
     # """the target KL divergence threshold"""
-    binary: bool = True
+    binary: bool = False
     """if toggled, the detectability rewards will be binary"""
 
     # Watermark specific arguments
@@ -401,7 +401,7 @@ class Actor(nn.Module):
                 r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
                 rewards.append(r_wm + r_senti)
-                
+
                 detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
             else:
                 tmp1 = - d_ori + d_wm - d_senti
