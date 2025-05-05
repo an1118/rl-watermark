@@ -61,6 +61,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     # target_kl: float = None
     # """the target KL divergence threshold"""
+    binary: bool = True
+    """if toggled, the detectability rewards will be binary"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -285,7 +287,7 @@ class Actor(nn.Module):
         # normalized_score = normalized_score.item()
         return normalized_score
 
-    def compute_rewards(self, data, watermarked_texts):
+    def compute_rewards(self, data, watermarked_texts, binary):
         """
         Compute the rewards for the generated watermarked texts.
 
@@ -381,18 +383,32 @@ class Actor(nn.Module):
                 return 0
             return 1
 
-        detect_overall = []
-        for d_ori, d_wm, d_para, d_senti, d_senti_latter, d_hate in zip(detect_ori * len(detect_wm), detect_wm, detect_para_filled, detect_senti_filled, detect_senti_latter_filled, detect_hate):
-            r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
-            r_para = reward_should_detect(d_para, d_ori, threshold_para)
+        detect_overall, rewards = [], []
+        for d_ori, d_wm, d_para, d_senti, d_senti_latter, d_hate in zip(
+            detect_ori * len(detect_wm),
+            detect_wm,
+            detect_para_filled,
+            detect_senti_filled,
+            detect_senti_latter_filled,
+            detect_hate,
+        ):
+            if binary:
+                r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
+                r_para = reward_should_detect(d_para, d_ori, threshold_para)
 
-            r_senti = reward_should_not_detect(d_senti, d_ori, threshold_senti)
-            r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
-            r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
+                r_senti = reward_should_not_detect(d_senti, d_ori, threshold_senti)
+                r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
+                r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
-            detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
+                rewards.append(r_wm + r_senti)
+                
+                detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
+            else:
+                tmp1 = - d_ori + d_wm - d_senti
+                rewards.append(tmp1.item())
 
-        rewards = detect_overall
+                tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
+                detect_overall.append(tmp2.item())
 
         G = len(watermarked_texts)  # debug
         result_dict = {
@@ -405,6 +421,7 @@ class Actor(nn.Module):
             'detect_senti': [d for d in detect_senti if d is not None],
             'detect_senti_latter': [d for d in detect_senti_latter if d is not None],
             'detect_hate': [d for d in detect_hate if d is not None],
+            'detect_overall': detect_overall,
             # =======debug======== #
             'sucess_para': len([d for d in detect_para if d is not None]) / G,
             'sucess_senti': len([d for d in detect_senti if d is not None]) / G,
@@ -421,12 +438,16 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack-binary"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_senti"
+    if args.binary:
+        run_name += "-binary"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_attack-binary"
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_senti"
+    if args.binary:
+        args.checkpoint_dir += "-binary"
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-    best_mean_reward = float("-inf")  # track best
+    best_mean_detect = float("-inf")  # track best
 
     print(f"Run name: {run_name}")
     print(f"Checkpoint directory: {args.checkpoint_dir}")
@@ -487,6 +508,7 @@ if __name__ == "__main__":
             
             ## compute rewards
             all_rewards = []  # [B, G]
+            all_rewards_detect_overall = []  # [B, G]
             all_rewards_detect = []  # [B*G]
             all_rewards_detect_ori, all_rewards_detect_wm = [], []
             all_rewards_detect_para, all_rewards_detect_senti, all_rewards_detect_senti_latter,  all_rewards_detect_hate = [], [], [], []
@@ -496,7 +518,7 @@ if __name__ == "__main__":
                 data = {k: batch[k][data_idx] for k in batch.keys()}
                 watermarked_texts = all_watermarked_texts[data_idx]
 
-                result_dict = actor.compute_rewards(data, watermarked_texts)  # [G]
+                result_dict = actor.compute_rewards(data, watermarked_texts, args.binary)  # [G]
                 all_rewards.append(result_dict['rewards'])
                 # all_rewards_relevance.extend(result_dict['relevance_scores'])
                 # all_rewards_text_quality.extend(result_dict['text_quality_scores'])
@@ -506,6 +528,7 @@ if __name__ == "__main__":
                 all_rewards_detect_senti.extend(result_dict['detect_senti'])
                 all_rewards_detect_senti_latter.extend(result_dict['detect_senti_latter'])
                 all_rewards_detect_hate.extend(result_dict['detect_hate'])
+                all_rewards_detect_overall.append(result_dict['detect_overall'])
                 # ==========debug======== #
                 all_success_para.append(result_dict['sucess_para'])
                 all_success_senti.append(result_dict['sucess_senti'])
@@ -515,17 +538,17 @@ if __name__ == "__main__":
                 # Calculate the ratio of groups having all one elements
                 one_rewards_ratio = sum(np.all(r == 1) for r in all_rewards) / len(all_rewards)
 
-            ## save checkpoint with best reward
-            flat_rews = [r for sub in all_rewards for r in sub]  # flatten rewards
-            mean_reward = np.mean(flat_rews)
+            ## save checkpoint with best overall performance on all dimensions
+            flat_detects = [r for sub in all_rewards_detect_overall for r in sub]  # flatten rewards
+            mean_detect = np.mean(flat_detects)
             if global_step >0:
-                if mean_reward > best_mean_reward:
-                    best_mean_reward = mean_reward
+                if mean_detect > best_mean_detect:
+                    best_mean_detect = mean_detect
                     ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
                     # save the embed_map model + tokenizer
                     actor.embed_map_model.save_pretrained(ckpt_path)
                     actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-                    print(f"[Checkpoint] new best mean reward {mean_reward:.4f}, saved to {ckpt_path} after step {global_step}")
+                    print(f"[Checkpoint] new best mean reward {mean_detect:.4f}, saved to {ckpt_path} after step {global_step}")
 
             if global_step != -1:
                 # record detailed rewards
@@ -542,7 +565,7 @@ if __name__ == "__main__":
                     , flush=True
                 )
                 wandb.log({
-                    "train/overall_reward": np.mean(flat_rews),
+                    "train/overall_reward": np.mean([r for sub in all_rewards for r in sub]),
                     # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
                     # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
                     "train/reward/detect_ori": torch.mean(torch.stack(all_rewards_detect_ori)).item(),
