@@ -61,7 +61,7 @@ class Args:
     """the maximum norm for the gradient clipping"""
     # target_kl: float = None
     # """the target KL divergence threshold"""
-    binary: bool = False
+    binary: bool = True
     """if toggled, the detectability rewards will be binary"""
 
     # Watermark specific arguments
