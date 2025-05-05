@@ -302,7 +302,7 @@ class Actor(nn.Module):
         # relevance_scores, text_quality_scores = [], []
         # for watermarked_text in watermarked_texts:
         #     text_quality, relevance = None, None
-        #     quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o')
+        #     quality_result_dict = _judge_text_quality(data['original'], watermarked_text, model='gpt-4o-mini')
         #     if quality_result_dict:
         #         text_quality = quality_result_dict['Text quality']
         #         relevance = quality_result_dict['Relevance']
@@ -327,11 +327,11 @@ class Actor(nn.Module):
             out['wm'] = self.detect(wm_text)
 
             # paraphrase
-            para = paraphrase_attack(wm_text, max_call=1, model='gpt-4o')
+            para = paraphrase_attack(wm_text, max_call=1, model='gpt-4o-mini')
             out['para'] = self.detect(para) if para else None
 
             # sentiment spoof
-            senti_res = spoofing_attack(wm_text, max_call=1, model='gpt-4o')
+            senti_res = spoofing_attack(wm_text, max_call=1, model='gpt-4o-mini')
             senti = senti_res.get('spoofing_watermarked_text')
             out['senti'] = self.detect(senti) if senti else None
 
@@ -339,7 +339,7 @@ class Actor(nn.Module):
             orig_sent = senti_res.get('original_sentiment')
             tgt_sent = senti_res.get('target_modified_sentiment')
             latter_res = latter_spoofing_attack(
-                wm_text, orig_sent, tgt_sent, max_call=1, model='gpt-4o'
+                wm_text, orig_sent, tgt_sent, max_call=1, model='gpt-4o-mini'
             )
             latter = latter_res.get('latter_spoofing_watermarked_text')
             out['latter'] = self.detect(latter) if latter else None
