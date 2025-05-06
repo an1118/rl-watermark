@@ -63,7 +63,7 @@ class Args:
     # """the target KL divergence threshold"""
     binary: bool = False
     """if toggled, the detectability rewards will be binary"""
-    use_soft_split: bool = True
+    use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
 
     # Watermark specific arguments
