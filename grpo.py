@@ -406,11 +406,11 @@ class Actor(nn.Module):
                 r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
                 r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
-                rewards.append(r_senti)
+                rewards.append(r_para)
 
                 detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
             else:
-                tmp1 = - d_senti
+                tmp1 = d_para
                 rewards.append(tmp1.item() if isinstance(tmp1, torch.Tensor) else tmp1)
 
                 tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
@@ -444,14 +444,14 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-para"
     if args.binary:
         run_name += "-binary"
     if args.use_soft_split:
         run_name += "-soft"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/mnt/data2/lian/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
+    args.checkpoint_dir = rf"/mnt/data2/lian/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-para"
     if args.binary:
         args.checkpoint_dir += "-binary"
     if args.use_soft_split:
