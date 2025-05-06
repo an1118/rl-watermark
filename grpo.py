@@ -43,7 +43,7 @@ class Args:
     # GRPO training arguments
     num_iterations: int = 200
     """the number of iterations (computed in runtime)"""
-    batch_size: int = 16  # 16  # TODO
+    batch_size: int = 4  # 16
     """the batch size"""
     num_minibatches: int = 2  # 1
     """the number of mini-batches"""
@@ -63,6 +63,8 @@ class Args:
     # """the target KL divergence threshold"""
     binary: bool = False
     """if toggled, the detectability rewards will be binary"""
+    use_soft_split: bool = True
+    """if toggled, use soft green-red split score"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -108,7 +110,7 @@ Just provide the paraphrased version of the text, without any introductory or co
 
 
 class Actor(nn.Module):
-    def __init__(self, embed_map_model_name, watermark_model_name):
+    def __init__(self, embed_map_model_name, watermark_model_name, use_soft_split):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
@@ -133,6 +135,7 @@ class Actor(nn.Module):
         vocabulary_size = self.watermark_model.config.vocab_size
         self.mapping_list = vocabulary_mapping(vocabulary_size, 384, seed=66)
 
+        self.use_soft_split = use_soft_split  # use soft green-red split score or not
         self.delta = 0.13  # watermark strength
         self.alpha = 1.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
@@ -243,8 +246,11 @@ class Actor(nn.Module):
         # last hidden states shape is [batch_size, sequence_length, hidden_size]
         outputs = self.embed_map_model(**input_ids, return_dict=True, sent_emb=True)
         mapping = outputs.pooler_output.squeeze()
-        mapping = sign_ste(mapping)
-        mapping = (mapping + 1) / 2
+        if self.use_soft_split:
+            mapping = torch.sigmoid(mapping)
+        else:
+            mapping = sign_ste(mapping)
+            mapping = (mapping + 1) / 2
         green_red_split = mapping[self.mapping_list].clone().to(self.gpu1)
         return green_red_split
 
@@ -441,11 +447,15 @@ if __name__ == "__main__":
     run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-hate"
     if args.binary:
         run_name += "-binary"
+    if args.use_soft_split:
+        run_name += "-soft"
 
     # make checkpoint dir and init best reward
     args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-hate"
     if args.binary:
         args.checkpoint_dir += "-binary"
+    if args.use_soft_split:
+        args.checkpoint_dir += "-soft"
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-reward'), exist_ok=True)
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-all_dims'), exist_ok=True)
     best_mean_detect, best_mean_reward = float("-inf"), float("-inf")  # track best
@@ -473,7 +483,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    actor = Actor(args.embed_map_model_name, args.watermark_model_name)
+    actor = Actor(args.embed_map_model_name, args.watermark_model_name, args.use_soft_split)
     optimizer = optim.Adam(actor.parameters(), lr=args.learning_rate, eps=1e-5)
     train_set = load_dataset(args.dataset_name, split='train')
     if args.is_sanity_check:
