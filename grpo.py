@@ -367,7 +367,7 @@ class Actor(nn.Module):
         detect_senti_latter_filled = fill_na(detect_senti_latter)
 
         # gather the detectability scores
-        threshold_wm = 0.19  # TODO
+        threshold_wm = 0.15  # TODO
         threshold_para = 0.04
         threshold_senti = 0.01
         threshold_latter = 0.03
@@ -400,11 +400,11 @@ class Actor(nn.Module):
                 r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
                 r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
-                rewards.append(r_wm + r_senti)
+                rewards.append(r_senti)
 
                 detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
             else:
-                tmp1 = - d_ori + d_wm - d_senti
+                tmp1 = - d_senti
                 rewards.append(tmp1.item())
 
                 tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
@@ -438,16 +438,17 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_senti"
+    run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
     if args.binary:
         run_name += "-binary"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-detect_senti"
+    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
     if args.binary:
         args.checkpoint_dir += "-binary"
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    best_mean_detect = float("-inf")  # track best
+    os.makedirs(os.path.join(args.checkpoint_dir, 'best-reward'), exist_ok=True)
+    os.makedirs(os.path.join(args.checkpoint_dir, 'best-all_dims'), exist_ok=True)
+    best_mean_detect, best_mean_reward = float("-inf"), float("-inf")  # track best
 
     print(f"Run name: {run_name}")
     print(f"Checkpoint directory: {args.checkpoint_dir}")
@@ -539,16 +540,25 @@ if __name__ == "__main__":
                 one_rewards_ratio = sum(np.all(r == 1) for r in all_rewards) / len(all_rewards)
 
             ## save checkpoint with best overall performance on all dimensions
-            flat_detects = [r for sub in all_rewards_detect_overall for r in sub]  # flatten rewards
+            flat_detects = [r for sub in all_rewards_detect_overall for r in sub]  # flatten
+            flat_rewards = [r for sub in all_rewards for r in sub]
             mean_detect = np.mean(flat_detects)
+            mean_rewards = np.mean(flat_rewards)
             if global_step >0:
-                if mean_detect > best_mean_detect:
-                    best_mean_detect = mean_detect
-                    ckpt_path = os.path.join(args.checkpoint_dir, "embed_map_model_best")
+                def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
+                    ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
                     # save the embed_map model + tokenizer
                     actor.embed_map_model.save_pretrained(ckpt_path)
                     actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-                    print(f"[Checkpoint] new best mean reward {mean_detect:.4f}, saved to {ckpt_path} after step {global_step}")
+                    print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}")
+                # save ckpt with best detec scores
+                if mean_detect > best_mean_detect:
+                    best_mean_detect = mean_detect
+                    save_checkpoint(actor, args.checkpoint_dir, "best-all_dims", best_mean_detect, global_step)
+                # save ckpt with best reward
+                if mean_rewards > best_mean_reward:
+                    best_mean_reward = mean_rewards
+                    save_checkpoint(actor, args.checkpoint_dir, "best-reward", best_mean_reward, global_step)
 
             if global_step != -1:
                 # record detailed rewards
