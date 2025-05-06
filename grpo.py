@@ -451,7 +451,7 @@ if __name__ == "__main__":
         run_name += "-soft"
 
     # make checkpoint dir and init best reward
-    args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
+    args.checkpoint_dir = rf"/mnt/data2/lian/projects/rl-watermark/ckpts/batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-senti"
     if args.binary:
         args.checkpoint_dir += "-binary"
     if args.use_soft_split:
