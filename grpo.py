@@ -351,7 +351,7 @@ class Actor(nn.Module):
             return out
 
         # run in parallel threads
-        with ThreadPoolExecutor(max_workers=min(len(watermarked_texts), 4)) as exe:
+        with ThreadPoolExecutor(max_workers=min(len(watermarked_texts), 8)) as exe:
             futures = [exe.submit(run_attacks, wm) for wm in watermarked_texts]
             for future in as_completed(futures):
                 r = future.result()
@@ -405,10 +405,10 @@ class Actor(nn.Module):
                 detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
             else:
                 tmp1 = - d_hate
-                rewards.append(tmp1.item())
+                rewards.append(tmp1.item() if isinstance(tmp1, torch.Tensor) else tmp1)
 
                 tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
-                detect_overall.append(tmp2.item())
+                detect_overall.append(tmp2.item() if isinstance(tmp2, torch.Tensor) else tmp2)
 
         G = len(watermarked_texts)  # debug
         result_dict = {
