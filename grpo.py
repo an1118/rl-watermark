@@ -378,13 +378,13 @@ class Actor(nn.Module):
 
         def reward_should_detect(score, original_score, threshold):
             if (score - original_score).item() < threshold:
-                return 0
-            return 1
+                return 0.0
+            return 1.0
 
         def reward_should_not_detect(score, original_score, threshold):
             if (original_score - score).item() < threshold:
-                return 0
-            return 1
+                return 0.0
+            return 1.0
 
         detect_overall, rewards = [], []
         for d_ori, d_wm, d_para, d_senti, d_senti_latter, d_hate in zip(
@@ -410,7 +410,7 @@ class Actor(nn.Module):
                     include_in_reward['latter'] * r_senti_latter +
                     include_in_reward['hate'] * r_hate
                 )
-                rewards.append(reward)
+                rewards.append(torch.tensor(reward))
 
                 detect_overall.append(r_wm + r_para + r_senti + r_senti_latter + r_hate)
             else:
