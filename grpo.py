@@ -69,7 +69,7 @@ class Args:
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
     """the name of the run logged to wandb"""
-    log_gradient_norm: bool = False
+    log_grad_norm: bool = False
     """if toggled, the gradient norm of the two parts of the loss will be logged to wandb"""
 
     # Watermark specific arguments
@@ -109,7 +109,7 @@ class Actor(nn.Module):
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
         self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer
-        # self.gpu2 = torch.device(f"cuda:{cuda_visible_devices.split(',')[2]}")  # for embed model
+        self.gpu2 = torch.device(f"cuda:2")  # for embed model
 
         self.watermark_model_vllm = LLM(
             model="meta-llama/Llama-3.1-8B-Instruct", 
@@ -118,7 +118,7 @@ class Actor(nn.Module):
         )
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
-        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu1)
+        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
         for param in self.embed_map_model.parameters():
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
@@ -235,7 +235,7 @@ class Actor(nn.Module):
         else:
             mapping = sign_ste(mapping)
             mapping = (mapping + 1) / 2
-        green_red_split = mapping[self.mapping_list].clone().to(self.gpu1)
+        green_red_split = mapping[self.mapping_list].clone().to(self.watermark_model.device)
         return green_red_split
 
     def _next_token_entropy(self, logits):
@@ -258,7 +258,7 @@ class Actor(nn.Module):
             text, 
             return_tensors='pt',
             add_special_tokens=False
-        ).to(self.embed_map_model.device)
+        ).to(self.watermark_model.device)
 
         logits = self.watermark_model(input_ids=input_ids, logits_to_keep=input_ids.size(1)).logits
         logits = logits[:, :-1, :].squeeze(0)  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
