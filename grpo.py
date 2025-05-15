@@ -503,7 +503,7 @@ if __name__ == "__main__":
 
     # env setup
     actor = Actor(args.embed_map_model_name, args.watermark_model_name, args.use_soft_split)
-    optimizer = optim.Adam(actor.parameters(), lr=args.learning_rate, eps=1e-5)
+    optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     train_set = load_dataset(args.dataset_name, split='train')
     if args.is_sanity_check:
         # use only one batch for sanity check
