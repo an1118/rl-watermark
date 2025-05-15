@@ -1,8 +1,12 @@
 import random
 import torch
 import torch.nn.functional as F
-import subprocess
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import numpy as np
+import wandb
+
+from attack import paraphrase_attack, spoofing_attack, latter_spoofing_attack, hate_attack
 
 def vocabulary_mapping(vocab_size, model_output_dim, seed=66):
     random.seed(seed)
@@ -107,8 +111,106 @@ def safe(t, device):
 
 def fill_na(values):
     if all(v is None for v in values):
-        return [0.0] * len(values)
-    values = [v.item() if isinstance(v, torch.Tensor) else v for v in values]
+        return [torch.tensor(0.0)] * len(values)
     valid_values = [v for v in values if v is not None]
-    avg_value = sum(valid_values) / len(valid_values) if valid_values else 0.0
+    avg_value = torch.stack(valid_values).mean()
     return [avg_value if v is None else v for v in values]
+
+
+def run_attacks(watermarked_tuples):
+    '''
+    Run all attacks for one group of watermarked texts and return the attack results.
+    Args:
+        watermarked_tuples (list): A list of tuples (watermarked texts (rollouts), wm text ids, logprobs) for the same original text.
+    '''
+    hate_phrases_path = "hate_phrase.json"
+    with open(hate_phrases_path, 'r') as f:
+        hate_phrases_list = json.load(f)
+
+    # helper to run all attacks for one wm_text
+    def _run_attacks(wm_tuple):
+        wm_text = wm_tuple[0]
+        out = {'wm_tuple': wm_tuple}
+        # paraphrase
+        para = paraphrase_attack(wm_text, max_call=1, model='gpt-4o-mini')
+        out['para_text'] = para
+
+        # sentiment spoof
+        senti_res = spoofing_attack(wm_text, max_call=1, model='gpt-4o-mini')
+        senti = senti_res.get('spoofing_watermarked_text')
+        out['senti_text'] = senti
+
+        # # latter sentiment spoof
+        # orig_sent = senti_res.get('original_sentiment')
+        # tgt_sent = senti_res.get('target_modified_sentiment')
+        # latter_res = latter_spoofing_attack(
+        #     wm_text, orig_sent, tgt_sent, max_call=1, model='gpt-4o-mini'
+        # )
+        # latter = latter_res.get('latter_spoofing_watermarked_text')
+        # out['latter_text'] = latter
+
+        # hate spoof
+        hate = hate_attack(hate_phrases_list, wm_text)
+        out['hate_text'] = hate
+
+        return out
+
+    # wm_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = [], [], [], [], []
+    wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = [], [], [], []
+    # run in parallel threads
+    with ThreadPoolExecutor(max_workers=min(len(watermarked_tuples), 8)) as exe:
+        futures = [exe.submit(_run_attacks, wm) for wm in watermarked_tuples]
+        for future in as_completed(futures):
+            r = future.result()
+            wm_tuples.append(r['wm_tuple'])
+            attack_para_texts.append(r['para_text'])
+            attack_senti_texts.append(r['senti_text'])
+            # attack_senti_latter_texts.append(r['latter_text'])
+            attack_hate_texts.append(r['hate_text'])
+    
+    # return wm_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts
+    return wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
+
+
+def print_and_log(
+    global_step, 
+    mean_rewards,
+    all_rewards_relevance=None, 
+    all_rewards_text_quality=None, 
+    all_rewards_detect_ori=None, 
+    all_rewards_detect_wm=None, 
+    all_rewards_detect_para=None, 
+    all_rewards_detect_senti=None, 
+    all_rewards_detect_hate=None,
+    all_success_para=None,
+    all_success_senti=None,
+    zero_rewards_group=None,
+    one_rewards_group=None,
+):
+    print(
+        f"Step: {global_step}, "
+        # f"relevance: {np.mean(all_rewards_relevance):.4f}, "
+        # f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
+        f"detect_ori: {torch.mean(torch.cat(all_rewards_detect_ori)).item():.4f}, "
+        f"detect_wm: {torch.mean(torch.cat(all_rewards_detect_wm)).item():.4f}, "
+        f"detect_para: {torch.mean(torch.cat(all_rewards_detect_para)).item():.4f}, "
+        f"detect_senti: {torch.mean(torch.cat(all_rewards_detect_senti)).item():.4f}, "
+        f"detect_hate: {torch.mean(torch.cat(all_rewards_detect_hate)).item():.4f}, "
+        , flush=True
+    )
+    
+    wandb.log({
+        "train/overall_reward": mean_rewards,
+        # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
+        # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
+        "train/reward/detect_ori": torch.mean(torch.cat(all_rewards_detect_ori)).item(),
+        "train/reward/detect_wm": torch.mean(torch.cat(all_rewards_detect_wm)).item(),
+        "train/reward/detect_para": torch.mean(torch.cat(all_rewards_detect_para)).item(),
+        "train/reward/detect_senti": torch.mean(torch.cat(all_rewards_detect_senti)).item(),
+        "train/reward/detect_hate": torch.mean(torch.cat(all_rewards_detect_hate)).item(),
+        #==========debug======== #
+        "train/success_rate_para": np.mean(all_success_para),
+        "train/success_rate_senti": np.mean(all_success_senti),
+        "train/zero_rewards_group": zero_rewards_group,
+        "train/one_rewards_group": one_rewards_group,
+    }, step=global_step)
