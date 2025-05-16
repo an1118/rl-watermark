@@ -624,6 +624,7 @@ if __name__ == "__main__":
             np.random.shuffle(b_inds)  # shuffle the batch indices
 
             for start in range(0, args.batch_size, args.minibatch_size):
+                # start_time = time.time()  # debug
                 # get minibatch
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
@@ -653,6 +654,10 @@ if __name__ == "__main__":
                     # std = new_mb_rewards.std(dim=1, keepdim=True) + 1e-8
                     # new_mb_advantages = (new_mb_rewards - mean) / std
                     # import pdb; pdb.set_trace()  # check if new_mb_advantages are calculated on correct dimensions
+
+                # tmp1_time = time.time()
+                # on_policy_calculation_time = tmp1_time - start_time
+                # print(f"On policy calculation time: {on_policy_calculation_time:.4f} seconds")
 
                 total_loss_pg, total_loss_rg, total_output_len = 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
@@ -714,10 +719,18 @@ if __name__ == "__main__":
                 loss /= total_output_len  # average over the total output length
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
+                # tmp2_time = time.time()
+                # loss_calculation_time = tmp2_time - tmp1_time
+                # print(f"Loss calculation time: {loss_calculation_time:.4f} seconds")
+
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
                 optimizer.step()
+
+                # tmp3_time = time.time()
+                # optimization_time = tmp3_time - tmp2_time
+                # print(f"Optimization time: {optimization_time:.4f} seconds")
 
                 global_step += 1
 
