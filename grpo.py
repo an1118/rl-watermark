@@ -59,18 +59,32 @@ class Args:
     """the maximum norm for the gradient clipping"""
     # target_kl: float = None
     # """the target KL divergence threshold"""
-    binary: bool = False
-    """if toggled, the detectability rewards will be binary"""
-    use_soft_split: bool = False
-    """if toggled, use soft green-red split score"""
-    add_reward_gradient: bool = False
-    """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     checkpoint_dir: str = None
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
     """the name of the run logged to wandb"""
     log_grad_norm: bool = False
     """if toggled, the gradient norm of the two parts of the loss will be logged to wandb"""
+
+    # Reward function arguments
+    binary: bool = False
+    """if toggled, the detectability rewards will be binary"""
+    use_soft_split: bool = False
+    """if toggled, use soft green-red split score"""
+    add_reward_gradient: bool = False
+    """if toggled, will added the second gradient term, which calculates gradient on rewards"""
+    include_in_reward_ori: float = 0.5
+    """whether to include the original text's detection score in the reward calculation, if not 0 or 1, calculated as the squared difference from it"""
+    include_in_reward_wm: int = 1
+    """whether to include the watermarked text's detection score in the reward calculation (0 or 1)"""
+    include_in_reward_para: int = 1
+    """whether to include the paraphrased text's detection score in the reward calculation (0 or 1)"""
+    include_in_reward_senti: int = 1
+    """whether to include the sentiment attacked text's detection score in the reward calculation (0 or 1)"""
+    # include_in_reward_latter: int = 1
+    """whether to include the latter sentiment attacked text's detection score in the reward calculation (0 or 1)"""
+    include_in_reward_hate: int = 1
+    """whether to include the hate attacked text's detection score in the reward calculation (0 or 1)"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -89,6 +103,15 @@ class Args:
     # to be filled in runtime
     minibatch_size: int = 0
     """the mini-batch size (computed in runtime)"""
+
+    def __post_init__(self):
+        for attr in [
+            "include_in_reward_wm", "include_in_reward_para",
+            "include_in_reward_senti", "include_in_reward_hate"
+        ]:
+            if getattr(self, attr, -1) not in (0, 1):
+                raise ValueError(f"{attr} must be either 0 or 1.")
+            
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -284,6 +307,7 @@ class Actor(nn.Module):
         original_text, 
         watermarked_tuples, 
         binary, 
+        include_in_reward,
         attack_texts=None, 
     ):
         """
@@ -331,14 +355,6 @@ class Actor(nn.Module):
         # detect_para, detect_senti, detect_senti_latter, detect_hate = [], [], [], []
         detect_para, detect_senti, detect_hate = [], [], []
         has_gradient = True if attack_texts else False
-        include_in_reward = {
-            "ori": 1,
-            "wm": 1,
-            "para": 1,
-            "senti": 1,
-            # "latter": 0,
-            "hate": 1,
-        } # TODO: pass through input
         
         original_score = self.detect(original_text, has_gradient=has_gradient and (binary or bool(include_in_reward['ori'])))
         detect_ori.append(original_score)
@@ -407,8 +423,14 @@ class Actor(nn.Module):
                 tmp = r_wm + r_para + r_senti + r_hate
                 detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
             else:
+                # different ways to calculate original score
+                if args.include_in_reward_ori not in (0, 1):  # calculate the squared difference of original score from 0.5 (include_in_reward_ori)
+                    original_text_reward = (d_ori - args.include_in_reward_ori) ** 2
+                else:
+                    original_text_reward = d_ori
+
                 tmp1 = (
-                    - include_in_reward['ori'] * d_ori
+                    - include_in_reward['ori'] * original_text_reward
                     + include_in_reward['wm'] * d_wm
                     + include_in_reward['para'] * d_para
                     - include_in_reward['senti'] * d_senti
@@ -456,8 +478,22 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
 
+    include_in_reward = {
+        "ori": args.include_in_reward_ori,
+        "wm": args.include_in_reward_wm,
+        "para": args.include_in_reward_para,
+        "senti": args.include_in_reward_senti,
+        # "latter": args.include_in_reward_latter,
+        "hate": args.include_in_reward_hate,
+    }
+
     if not args.run_name:
-        args.run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-detect_attack"
+        args.run_name = (
+            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}"
+            f"-ori{args.include_in_reward_ori}wm{args.include_in_reward_wm}"
+            f"para{args.include_in_reward_para}senti{args.include_in_reward_senti}"
+            f"hate{args.include_in_reward_hate}"
+        )
         if args.binary:
             args.run_name += "-binary"
         if args.use_soft_split:
@@ -468,13 +504,7 @@ if __name__ == "__main__":
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
         current_date = time.strftime("%m%d")
-        args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/{current_date}-batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-detect_attck"
-        if args.binary:
-            args.checkpoint_dir += "-binary"
-        if args.use_soft_split:
-            args.checkpoint_dir += "-soft"
-        if args.add_reward_gradient:
-            args.checkpoint_dir += "-reward_gradient"
+        args.checkpoint_dir = rf"/blue/buyuheng/li_an.ucsb/projects/rl-watermark/ckpts/{current_date}-{args.run_name}"
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-reward'), exist_ok=True)
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-all_dims'), exist_ok=True)
     best_mean_detect, best_mean_reward = float("-inf"), float("-inf")  # track best
@@ -549,7 +579,7 @@ if __name__ == "__main__":
                 original_data = batch['original'][data_idx]
                 watermarked_tuples = all_watermarked_tuples[data_idx]
 
-                result_dict = actor.compute_rewards(original_data, watermarked_tuples, args.binary)  # [G]
+                result_dict = actor.compute_rewards(original_data, watermarked_tuples, args.binary, include_in_reward)  # [G]
                 # import pdb; pdb.set_trace()  # check in result_dict, if attack texts and wm texts match
                 all_watermarked_tuples[data_idx] = result_dict['wm_tuples']  # update watermarked tuples with new order
                 all_attack_texts.append(result_dict['attack_texts'])
@@ -644,7 +674,7 @@ if __name__ == "__main__":
                     new_mb_logprobs.append(new_logprobs)
                     if args.add_reward_gradient:
                         # import pdb; pdb.set_trace()  # go through the reward calculation, check if it has gradient
-                        result_dict = actor.compute_rewards(original_text, watermarked_tuples, args.binary, attack_texts=attack_texts)
+                        result_dict = actor.compute_rewards(original_text, watermarked_tuples, args.binary, include_in_reward, attack_texts=attack_texts)
                         new_mb_rewards.append(result_dict['rewards'])
                 if args.add_reward_gradient:
                     # calculate on policy advantages
