@@ -430,8 +430,8 @@ class Actor(nn.Module):
                 detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
             else:
                 # different ways to calculate original score
-                if args.include_in_reward_ori not in (0, 1):  # calculate the squared difference of original score from 0.5 (include_in_reward_ori)
-                    original_text_reward = (d_ori - args.include_in_reward_ori) ** 2
+                if args.include_in_reward_ori not in (0, 1):  # calculate the absolute difference of original score from 0.5 (include_in_reward_ori)
+                    original_text_reward = abs(d_ori - args.include_in_reward_ori)
                 else:
                     original_text_reward = d_ori
 
