@@ -18,7 +18,11 @@ from vllm import LLM, SamplingParams
 from datasets import load_dataset
 
 from models_cl import RobertaForCL
-from util import vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, sign_ste, watermark_logits_bias, run_attacks, fill_na, print_and_log
+from util import (
+    vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
+    sign_ste, watermark_logits_bias, run_attacks, fill_na, 
+    print_and_log, create_reference_model
+)
 from text_quality_score import _judge_text_quality
 
 @dataclass
@@ -57,8 +61,9 @@ class Args:
     """the surrogate clipping coefficient"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    # target_kl: float = None
-    # """the target KL divergence threshold"""
+    beta: float = 0.04
+    """KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
+        "training speed, but may be numerically unstable for long training runs."""
     checkpoint_dir: str = None
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
@@ -131,7 +136,7 @@ class Actor(nn.Module):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
-        self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer
+        self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer + reference model
         self.gpu2 = torch.device(f"cuda:2")  # for embed model
 
         self.watermark_model_vllm = LLM(
@@ -142,6 +147,7 @@ class Actor(nn.Module):
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
         self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
+        self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu1)
         for param in self.embed_map_model.parameters():
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
@@ -160,7 +166,7 @@ class Actor(nn.Module):
 
     def rollout(self, text, G):
         # get G/R split
-        green_red_split = self._get_green_red_split(text)
+        green_red_split = self._get_green_red_split(self.embed_map_model, text)
 
         # add prompt instruction
         messages = [
@@ -196,12 +202,12 @@ class Actor(nn.Module):
         # import pdb; pdb.set_trace()  # check generated results
         return watermarked_tuples
 
-    def get_per_token_logps(self, original_text, watermarked_texts_ids):
+    def get_per_token_logps(self, embed_model, original_text, watermarked_texts_ids):
         '''
         Compute the log probabilities of the watermarked text given the original text.
         '''
         # get G/R split
-        green_red_split = self._get_green_red_split(original_text)
+        green_red_split = self._get_green_red_split(embed_model, original_text)
 
         # concatenate the original text and the watermarked text
         ## add prompt instruction
@@ -243,15 +249,15 @@ class Actor(nn.Module):
         logits = logits[:, -logits_to_keep:]
         return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
 
-    def _get_green_red_split(self, text):
+    def _get_green_red_split(self, model, text):
         input_ids = self.embed_map_tokenizer(
             text,
             return_tensors='pt',
             truncation=True,  # Truncate input to the model's max length
             max_length=512    # Ensure the max length is 512 for RoBERTa
-        ).to(self.embed_map_model.device)
+        ).to(model.device)
         # last hidden states shape is [batch_size, sequence_length, hidden_size]
-        outputs = self.embed_map_model(**input_ids, return_dict=True, sent_emb=True)
+        outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mapping = outputs.pooler_output.squeeze()
         if self.use_soft_split:
             mapping = torch.sigmoid(mapping)
@@ -273,9 +279,9 @@ class Actor(nn.Module):
             return None
         
         if has_gradient:
-            green_red_split = self._get_green_red_split(text)
+            green_red_split = self._get_green_red_split(self.embed_map_model, text)
         else:
-            green_red_split = self._get_green_red_split(text).detach()
+            green_red_split = self._get_green_red_split(self.embed_map_model, text).detach()
         
         input_ids = self.watermark_tokenizer.encode(
             text, 
@@ -489,7 +495,7 @@ if __name__ == "__main__":
 
     if not args.run_name:
         args.run_name = (
-            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}"
+            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
             f"-ori{args.include_in_reward_ori}wm{args.include_in_reward_wm}"
             f"para{args.include_in_reward_para}senti{args.include_in_reward_senti}"
             f"hate{args.include_in_reward_hate}"
@@ -669,9 +675,14 @@ if __name__ == "__main__":
                 new_mb_logprobs = []  # [mb_size, G, seq_len_i]
                 new_mb_rewards = []  # [mb_size, G]
                 for original_text, watermarked_tuples, attack_texts in zip(mb_original_text, mb_watermarked_tuples, mb_attack_texts):
-                    new_logprobs = actor.get_per_token_logps(original_text, [t[1] for t in watermarked_tuples])  # [G, seq_len_i]
+                    new_logprobs = actor.get_per_token_logps(actor.embed_map_model, original_text, [t[1] for t in watermarked_tuples])  # [G, seq_len_i]
                     # import pdb; pdb.set_trace()  # check if new_logprobs has gradient
                     new_mb_logprobs.append(new_logprobs)
+                    if args.beta != 0.0:
+                        with torch.no_grad():
+                            ref_logprobs = actor.get_per_token_logps(actor.reference_embed_map_model, original_text, [t[1] for t in watermarked_tuples])
+                            per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
+                            # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
                     if args.add_reward_gradient:
                         # import pdb; pdb.set_trace()  # go through the reward calculation, check if it has gradient
                         result_dict = actor.compute_rewards(original_text, watermarked_tuples, args.binary, include_in_reward, attack_texts=attack_texts)
@@ -689,7 +700,7 @@ if __name__ == "__main__":
                 # on_policy_calculation_time = tmp1_time - start_time
                 # print(f"On policy calculation time: {on_policy_calculation_time:.4f} seconds")
 
-                total_loss_pg, total_loss_rg, total_output_len = 0, 0, 0
+                total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
                         new_logprobs = new_mb_logprobs[j][i]  # [seq_len_i]
@@ -711,6 +722,9 @@ if __name__ == "__main__":
                             pg_loss = torch.max(pg_loss, pg_loss_clipped)
                         # import pdb; pdb.set_trace()  # check if pg_loss is calculated correctly
                         total_loss_pg += pg_loss.sum()
+                        if args.beta != 0.0:
+                            kl = args.beta * per_token_kl[j][i].sum()
+                            total_kl += kl
                         if args.add_reward_gradient:
                             ratio_nogradient = ratio.detach()
                             # import pdb; pdb.set_trace()  # ratio_nogradient: no gradient, same value as ratio; new_mb_advantages: has gradient
@@ -744,6 +758,9 @@ if __name__ == "__main__":
                     wandb.log({"train/grad_norm_rg": grad_norm_rg}, step=global_step)
 
                 loss = total_loss_pg
+                if args.beta != 0.0:
+                    loss += total_kl
+                    wandb.log({"train/kl": total_kl.item()/total_output_len}, step=global_step)
                 if args.add_reward_gradient:
                     loss += total_loss_rg
                 loss /= total_output_len  # average over the total output length
@@ -766,4 +783,4 @@ if __name__ == "__main__":
 
                 # TRY NOT TO MODIFY: record rewards for plotting purposes
                 # writer.add_scalar("learning_rate", optimizer.param_groups[0]["lr"], global_step)
-                print("Step:", global_step, "loss:", loss.item())
+                print("Step:", global_step, "loss:", loss.item(), "kl:", total_kl.item() / total_output_len)

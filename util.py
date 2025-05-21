@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import numpy as np
 import wandb
+from copy import deepcopy
 
 from attack import paraphrase_attack, spoofing_attack, latter_spoofing_attack, hate_attack
 
@@ -214,3 +215,10 @@ def print_and_log(
         "train/zero_rewards_group": zero_rewards_group,
         "train/one_rewards_group": one_rewards_group,
     }, step=global_step)
+
+
+def create_reference_model(model):
+    ref_model = deepcopy(model)
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    return ref_model.eval()
