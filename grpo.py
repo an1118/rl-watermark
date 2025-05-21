@@ -77,6 +77,8 @@ class Args:
     use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
     add_reward_gradient: bool = False
+    """if toggled, will added loss for uniform perturbation and unbiased token preference"""
+    add_gr_loss: bool = False
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     include_in_reward_ori: float = 0.5
     """whether to include the original text's detection score in the reward calculation, if not 0 or 1, calculated as the squared difference from it"""
@@ -506,6 +508,8 @@ if __name__ == "__main__":
             args.run_name += "-soft"
         if args.add_reward_gradient:
             args.run_name += "-reward_gradient"
+        if args.add_gr_loss:
+            args.run_name += "-gr_loss"
 
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
@@ -696,6 +700,26 @@ if __name__ == "__main__":
                     # new_mb_advantages = (new_mb_rewards - mean) / std
                     # import pdb; pdb.set_trace()  # check if new_mb_advantages are calculated on correct dimensions
 
+                if args.add_gr_loss:
+                    # calculate gr splits
+                    mb_original_text_ids = actor.embed_map_tokenizer(
+                        mb_original_text,
+                        return_tensors='pt',
+                        truncation=True,  # Truncate input to the model's max length
+                        max_length=512,    # Ensure the max length is 512 for RoBERTa
+                        padding=True,
+                    ).to(actor.embed_map_model.device)
+                    # import pdb; pdb.set_trace()  # check mb_original_text_ids shape, should be [mb_size, seq_len]
+                    outputs = actor.embed_map_model(**mb_original_text_ids, return_dict=True, sent_emb=True)
+                    gr_splits = outputs.pooler_output
+                    # import pdb; pdb.set_trace()  # check outputs shape, should be [mb_size, hidden_size]
+                    # Calculate loss for uniform perturbation and unbiased token preference
+                    def sign_loss(x):
+                        row = torch.abs(torch.mean(torch.mean(x, dim=0)))
+                        col = torch.abs(torch.mean(torch.mean(x, dim=1)))
+                        return (row + col)/2
+                    loss_gr = sign_loss(gr_splits)
+
                 # tmp1_time = time.time()
                 # on_policy_calculation_time = tmp1_time - start_time
                 # print(f"On policy calculation time: {on_policy_calculation_time:.4f} seconds")
@@ -763,6 +787,9 @@ if __name__ == "__main__":
                     wandb.log({"train/kl": total_kl.item()/total_output_len}, step=global_step)
                 if args.add_reward_gradient:
                     loss += total_loss_rg
+                if args.add_gr_loss:
+                    loss += loss_gr.to(loss.device)
+                    wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
                 loss /= total_output_len  # average over the total output length
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
