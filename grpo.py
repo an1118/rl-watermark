@@ -77,9 +77,9 @@ class Args:
     use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
     add_reward_gradient: bool = False
-    """if toggled, will added loss for uniform perturbation and unbiased token preference"""
-    add_gr_loss: bool = False
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
+    add_gr_loss: bool = False
+    """if toggled, will added loss for uniform perturbation and unbiased token preference"""
     include_in_reward_ori: float = 0.5
     """whether to include the original text's detection score in the reward calculation, if not 0 or 1, calculated as the squared difference from it"""
     include_in_reward_wm: int = 1
