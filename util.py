@@ -106,6 +106,12 @@ def sign_ste(x):
     return x + x.sign() - x_nogradient
 
 
+# straight-through estimate step function
+def step_ste(x, threshold):
+    hard = (x > threshold).float()
+    return hard + x - x.detach()
+
+
 def safe(t, device):
     return t if t is not None else torch.tensor(0.0, device=device)
 

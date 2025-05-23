@@ -20,7 +20,7 @@ from datasets import load_dataset
 from models_cl import RobertaForCL
 from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
-    sign_ste, watermark_logits_bias, run_attacks, fill_na, 
+    sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model
 )
 from text_quality_score import _judge_text_quality
@@ -76,11 +76,13 @@ class Args:
     """if toggled, the detectability rewards will be binary"""
     use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
+    use_median_split: bool = False
+    """if toggled, use generated embedding as probabilities for sampling as green tokens"""
     add_reward_gradient: bool = False
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
-    detect_score_coefs_ori: float = 2.0
+    detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
@@ -114,7 +116,8 @@ class Args:
     """the mini-batch size (computed in runtime)"""
 
     def __post_init__(self):
-        pass
+        if self.use_median_split and self.add_gr_loss:
+            raise ValueError("use_median_split and add_gr_loss cannot both be True.")
             
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
@@ -131,7 +134,7 @@ Just provide the paraphrased version of the text, without any introductory or co
 
 
 class Actor(nn.Module):
-    def __init__(self, embed_map_model_name, watermark_model_name, use_soft_split):
+    def __init__(self, embed_map_model_name, watermark_model_name, use_soft_split, use_median_split):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
@@ -158,6 +161,7 @@ class Actor(nn.Module):
         self.mapping_list = vocabulary_mapping(vocabulary_size, 384, seed=66)
 
         self.use_soft_split = use_soft_split  # use soft green-red split score or not
+        self.use_median_split = use_median_split  # use generated embedding as probabilities for sampling as green tokens
         self.delta = 0.13  # watermark strength
         self.alpha = 1.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
@@ -249,18 +253,26 @@ class Actor(nn.Module):
         return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
 
     def _get_green_red_split(self, model, text):
+        # currently only support one text as input
         input_ids = self.embed_map_tokenizer(
             text,
             return_tensors='pt',
             truncation=True,  # Truncate input to the model's max length
             max_length=512    # Ensure the max length is 512 for RoBERTa
         ).to(model.device)
-        # last hidden states shape is [batch_size, sequence_length, hidden_size]
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mapping = outputs.pooler_output.squeeze()
+        # import pdb; pdb.set_trace()  # check mapping shape: [384]
         if self.use_soft_split:
             mapping = torch.sigmoid(mapping)
+        elif self.use_median_split:
+            threshold = torch.median(mapping, dim=0).values
+            mapping = step_ste(mapping, threshold)
+            # import pdb; pdb.set_trace()  # count the number of 1s and 0s in mapping
+            # num_close_to_one = torch.sum((mapping > 0.99999) & (mapping <= 1.0)).item()
+            # num_close_to_zero = torch.sum((mapping >= 0.00001) & (mapping < 0.01)).item()
         else:
+            # by default, use 0 as the threshold to divide the g/r tokens
             mapping = sign_ste(mapping)
             mapping = (mapping + 1) / 2
         green_red_split = mapping[self.mapping_list].clone().to(self.watermark_model.device)
@@ -503,6 +515,8 @@ if __name__ == "__main__":
             args.run_name += "-binary"
         if args.use_soft_split:
             args.run_name += "-soft"
+        if args.use_median_split:
+            args.run_name += "-median"
         if args.add_reward_gradient:
             args.run_name += "-reward_gradient"
         if args.add_gr_loss:
@@ -539,7 +553,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    actor = Actor(args.embed_map_model_name, args.watermark_model_name, args.use_soft_split)
+    actor = Actor(args.embed_map_model_name, args.watermark_model_name, args.use_soft_split, args.use_median_split)
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     train_set = load_dataset(args.dataset_name, split='train')
     if args.is_sanity_check:
