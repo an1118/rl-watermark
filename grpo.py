@@ -713,6 +713,8 @@ if __name__ == "__main__":
                     outputs = actor.embed_map_model(**mb_original_text_ids, return_dict=True, sent_emb=True)
                     gr_splits = outputs.pooler_output
                     # import pdb; pdb.set_trace()  # check outputs shape, should be [mb_size, hidden_size]
+                    gr_splits = sign_ste(gr_splits)
+                    # import pdb; pdb.set_trace()  # check outputs value
                     # Calculate loss for uniform perturbation and unbiased token preference
                     def sign_loss(x):
                         row = torch.abs(torch.mean(torch.mean(x, dim=0)))
