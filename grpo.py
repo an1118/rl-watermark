@@ -80,18 +80,20 @@ class Args:
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
-    include_in_reward_ori: float = 0.5
-    """whether to include the original text's detection score in the reward calculation, if not 0 or 1, calculated as the squared difference from it"""
-    include_in_reward_wm: int = 1
-    """whether to include the watermarked text's detection score in the reward calculation (0 or 1)"""
-    include_in_reward_para: int = 1
-    """whether to include the paraphrased text's detection score in the reward calculation (0 or 1)"""
-    include_in_reward_senti: int = 1
-    """whether to include the sentiment attacked text's detection score in the reward calculation (0 or 1)"""
-    # include_in_reward_latter: int = 1
-    """whether to include the latter sentiment attacked text's detection score in the reward calculation (0 or 1)"""
-    include_in_reward_hate: int = 1
-    """whether to include the hate attacked text's detection score in the reward calculation (0 or 1)"""
+    detect_score_coefs_ori: float = 2.0
+    """the coefficient of the original text's detection score in the reward calculation"""
+    target_ori_score: float = 0.5
+    """the target detection score of the original text, used to calculate the reward"""
+    detect_score_coefs_wm: float = 1.0
+    """the coefficient of the watermarked text's detection score in the reward calculation"""
+    detect_score_coefs_para: float = 1.0
+    """the coefficient of the paraphrased text's detection score in the reward calculation"""
+    detect_score_coefs_senti: float = 1.0
+    """the coefficient of the sentiment attacked text's detection score in the reward calculation"""
+    # detect_score_coefs_latter: float = 1.0
+    """the coefficient of the latter sentiment attacked text's detection score in the reward calculation"""
+    detect_score_coefs_hate: float = 1.0
+    """the coefficient of the hate attacked text's detection score in the reward calculation"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -112,12 +114,7 @@ class Args:
     """the mini-batch size (computed in runtime)"""
 
     def __post_init__(self):
-        for attr in [
-            "include_in_reward_wm", "include_in_reward_para",
-            "include_in_reward_senti", "include_in_reward_hate"
-        ]:
-            if getattr(self, attr, -1) not in (0, 1):
-                raise ValueError(f"{attr} must be either 0 or 1.")
+        pass
             
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
@@ -315,7 +312,7 @@ class Actor(nn.Module):
         original_text, 
         watermarked_tuples, 
         binary, 
-        include_in_reward,
+        detect_score_coefs,
         attack_texts=None, 
     ):
         """
@@ -364,7 +361,7 @@ class Actor(nn.Module):
         detect_para, detect_senti, detect_hate = [], [], []
         has_gradient = True if attack_texts else False
         
-        original_score = self.detect(original_text, has_gradient=has_gradient and (binary or bool(include_in_reward['ori'])))
+        original_score = self.detect(original_text, has_gradient=has_gradient and (binary or bool(detect_score_coefs['ori'])))
         detect_ori.append(original_score)
 
         for wm_tuple, para_text, senti_text, hate_text in zip(
@@ -374,11 +371,11 @@ class Actor(nn.Module):
             attack_hate_texts
         ):
             wm_text = wm_tuple[0]
-            detect_wm.append(self.detect(wm_text, has_gradient=has_gradient and bool(include_in_reward['wm'])))
-            detect_para.append(self.detect(para_text, has_gradient=has_gradient and bool(include_in_reward['para'])) if para_text else None)
-            detect_senti.append(self.detect(senti_text, has_gradient=has_gradient and bool(include_in_reward['senti'])) if senti_text else None)
-            # detect_senti_latter.append(self.detect(senti_latter_text, has_gradient=has_gradient and bool(include_in_reward['latter'])) if senti_latter_text else None)
-            detect_hate.append(self.detect(hate_text, has_gradient=has_gradient and bool(include_in_reward['hate'])) if hate_text else None)
+            detect_wm.append(self.detect(wm_text, has_gradient=has_gradient and bool(detect_score_coefs['wm'])))
+            detect_para.append(self.detect(para_text, has_gradient=has_gradient and bool(detect_score_coefs['para'])) if para_text else None)
+            detect_senti.append(self.detect(senti_text, has_gradient=has_gradient and bool(detect_score_coefs['senti'])) if senti_text else None)
+            # detect_senti_latter.append(self.detect(senti_latter_text, has_gradient=has_gradient and bool(detect_score_coefs['latter'])) if senti_latter_text else None)
+            detect_hate.append(self.detect(hate_text, has_gradient=has_gradient and bool(detect_score_coefs['hate'])) if hate_text else None)
         # import pdb; pdb.set_trace()  # check detect results for each type of attack, check gradient
 
         ## fill in the None values
@@ -420,29 +417,29 @@ class Actor(nn.Module):
                 r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
                 reward = (
-                    include_in_reward['wm'] * r_wm +
-                    include_in_reward['para'] * r_para +
-                    include_in_reward['senti'] * r_senti +
-                    include_in_reward['hate'] * r_hate
+                    detect_score_coefs['wm'] * r_wm +
+                    detect_score_coefs['para'] * r_para +
+                    detect_score_coefs['senti'] * r_senti +
+                    detect_score_coefs['hate'] * r_hate
                 )
-                    # include_in_reward['latter'] * r_senti_latter +
+                    # detect_score_coefs['latter'] * r_senti_latter +
                 # import pdb; pdb.set_trace()  # check if reward values calculated correctly
                 rewards.append(torch.tensor(reward))
                 tmp = r_wm + r_para + r_senti + r_hate
                 detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
             else:
                 # different ways to calculate original score
-                if args.include_in_reward_ori not in (0, 1):  # calculate the absolute difference of original score from 0.5 (include_in_reward_ori)
-                    original_text_reward = abs(d_ori - args.include_in_reward_ori)
+                if args.target_ori_score is not None:  # calculate the absolute difference of original score from 0.5 (target_ori_score)
+                    original_text_reward = abs(d_ori - args.target_ori_score)
                 else:
                     original_text_reward = d_ori
 
                 tmp1 = (
-                    - include_in_reward['ori'] * original_text_reward
-                    + include_in_reward['wm'] * d_wm
-                    + include_in_reward['para'] * d_para
-                    - include_in_reward['senti'] * d_senti
-                    - include_in_reward['hate'] * d_hate
+                    - detect_score_coefs['ori'] * original_text_reward
+                    + detect_score_coefs['wm'] * d_wm
+                    + detect_score_coefs['para'] * d_para
+                    - detect_score_coefs['senti'] * d_senti
+                    - detect_score_coefs['hate'] * d_hate
                 )
                 # import pdb; pdb.set_trace()  # check if reward values calculated correctly
                 rewards.append(tmp1)
@@ -486,21 +483,21 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
 
-    include_in_reward = {
-        "ori": args.include_in_reward_ori,
-        "wm": args.include_in_reward_wm,
-        "para": args.include_in_reward_para,
-        "senti": args.include_in_reward_senti,
-        # "latter": args.include_in_reward_latter,
-        "hate": args.include_in_reward_hate,
+    detect_score_coefs = {
+        "ori": args.detect_score_coefs_ori,
+        "wm": args.detect_score_coefs_wm,
+        "para": args.detect_score_coefs_para,
+        "senti": args.detect_score_coefs_senti,
+        # "latter": args.detect_score_coefs_latter,
+        "hate": args.detect_score_coefs_hate,
     }
 
     if not args.run_name:
         args.run_name = (
             f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
-            f"-ori{args.include_in_reward_ori}wm{args.include_in_reward_wm}"
-            f"para{args.include_in_reward_para}senti{args.include_in_reward_senti}"
-            f"hate{args.include_in_reward_hate}"
+            f"-ori{args.detect_score_coefs_ori}({args.target_ori_score})wm{args.detect_score_coefs_wm}"
+            f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
+            f"hate{args.detect_score_coefs_hate}"
         )
         if args.binary:
             args.run_name += "-binary"
@@ -589,7 +586,7 @@ if __name__ == "__main__":
                 original_data = batch['original'][data_idx]
                 watermarked_tuples = all_watermarked_tuples[data_idx]
 
-                result_dict = actor.compute_rewards(original_data, watermarked_tuples, args.binary, include_in_reward)  # [G]
+                result_dict = actor.compute_rewards(original_data, watermarked_tuples, args.binary, detect_score_coefs)  # [G]
                 # import pdb; pdb.set_trace()  # check in result_dict, if attack texts and wm texts match
                 all_watermarked_tuples[data_idx] = result_dict['wm_tuples']  # update watermarked tuples with new order
                 all_attack_texts.append(result_dict['attack_texts'])
@@ -689,7 +686,7 @@ if __name__ == "__main__":
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
                     if args.add_reward_gradient:
                         # import pdb; pdb.set_trace()  # go through the reward calculation, check if it has gradient
-                        result_dict = actor.compute_rewards(original_text, watermarked_tuples, args.binary, include_in_reward, attack_texts=attack_texts)
+                        result_dict = actor.compute_rewards(original_text, watermarked_tuples, args.binary, detect_score_coefs, attack_texts=attack_texts)
                         new_mb_rewards.append(result_dict['rewards'])
                 if args.add_reward_gradient:
                     # calculate on policy advantages
