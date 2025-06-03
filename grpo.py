@@ -16,6 +16,7 @@ import tyro
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from datasets import load_dataset
+from openai import OpenAI
 
 from models_cl import RobertaForCL
 from util import (
@@ -76,9 +77,9 @@ class Args:
     """if toggled, the detectability rewards will be binary"""
     use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
-    use_median_split: bool = False
+    use_median_split: bool = True
     """if toggled, use generated embedding as probabilities for sampling as green tokens"""
-    add_reward_gradient: bool = False
+    add_reward_gradient: bool = True
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
@@ -102,6 +103,10 @@ class Args:
     """the name of the embedding model"""
     watermark_model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
     """the name of the watermark model"""
+    attack_model_name: str = "Qwen/Qwen3-14B"
+    """the name of the local model used for attacks, if None, will use 4o-mini api calls"""
+    attack_model_url: str = "http://localhost:8000/v1"
+    """the url of the local model used for attacks, only used if `attack_model_name` is not None"""
 
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
@@ -118,7 +123,8 @@ class Args:
     def __post_init__(self):
         if self.use_median_split and self.add_gr_loss:
             raise ValueError("use_median_split and add_gr_loss cannot both be True.")
-            
+        if self.attack_model_name is not None and self.attack_model_url is None:
+            raise ValueError("If `attack_model_name` is specified, `attack_model_url` must also be provided.")
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -134,7 +140,15 @@ Just provide the paraphrased version of the text, without any introductory or co
 
 
 class Actor(nn.Module):
-    def __init__(self, embed_map_model_name, watermark_model_name, use_soft_split, use_median_split):
+    def __init__(
+        self, 
+        embed_map_model_name, 
+        watermark_model_name, 
+        attack_model_name, 
+        attack_model_url, 
+        use_soft_split, 
+        use_median_split
+    ):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
@@ -159,6 +173,9 @@ class Actor(nn.Module):
 
         vocabulary_size = self.watermark_model.config.vocab_size
         self.mapping_list = vocabulary_mapping(vocabulary_size, 384, seed=66)
+
+        self.attack_tokenizer = AutoTokenizer.from_pretrained(attack_model_name) if attack_model_name else None
+        self.attack_client = OpenAI(api_key="EMPTY", base_url=attack_model_url) if attack_model_url else None
 
         self.use_soft_split = use_soft_split  # use soft green-red split score or not
         self.use_median_split = use_median_split  # use generated embedding as probabilities for sampling as green tokens
@@ -363,8 +380,8 @@ class Actor(nn.Module):
             # attack_senti_latter_texts = attack_texts['senti_latter_texts']
             attack_hate_texts = attack_texts['hate_texts']
         else:
-            # watermarked_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = run_attacks(watermarked_tuples)
-            watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks(watermarked_tuples)
+            # watermarked_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = run_attacks(watermarked_tuples, self.attack_client, self.attack_tokenizer)
+            watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks(watermarked_tuples, self.attack_client, self.attack_tokenizer)
         # import pdb; pdb.set_trace()  # check attack texts, see if they match with corresponding wm texts
 
         ## detect
@@ -521,6 +538,8 @@ if __name__ == "__main__":
             args.run_name += "-reward_gradient"
         if args.add_gr_loss:
             args.run_name += "-gr_loss"
+        if args.attack_model_name:
+            args.run_name += f"-attack_{args.attack_model_name.split('/')[-1]}"
 
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
@@ -553,7 +572,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    actor = Actor(args.embed_map_model_name, args.watermark_model_name, args.use_soft_split, args.use_median_split)
+    actor = Actor(
+        embed_map_model_name=args.embed_map_model_name,
+        watermark_model_name=args.watermark_model_name,
+        attack_model_name=args.attack_model_name,
+        attack_model_url=args.attack_model_url,
+        use_soft_split=args.use_soft_split,
+        use_median_split=args.use_median_split,
+    )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     train_set = load_dataset(args.dataset_name, split='train')
     if args.is_sanity_check:
@@ -721,8 +747,9 @@ if __name__ == "__main__":
                         padding=True,
                     ).to(actor.embed_map_model.device)
                     # import pdb; pdb.set_trace()  # check mb_original_text_ids shape, should be [mb_size, seq_len]
-                    outputs = actor.embed_map_model(**mb_original_text_ids, return_dict=True, sent_emb=True)
-                    gr_splits = outputs.pooler_output
+                    with torch.no_grad():
+                        outputs = actor.embed_map_model(**mb_original_text_ids, return_dict=True, sent_emb=True)
+                        gr_splits = outputs.pooler_output
                     # import pdb; pdb.set_trace()  # check outputs shape, should be [mb_size, hidden_size]
                     gr_splits = sign_ste(gr_splits)
                     # import pdb; pdb.set_trace()  # check outputs value

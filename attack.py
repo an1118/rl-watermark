@@ -1,12 +1,13 @@
 import numpy as np
 import nltk
 nltk.download('punkt')
-from random import shuffle
 import re
 import random
 from api import call_chatgpt_api
 from tenacity import RetryError
 from vllm import SamplingParams
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pdb
 
@@ -53,7 +54,7 @@ Your task is to modify the given text to clearly shift its sentiment to {modifie
 ### Modification Criteria:
 1. **Minimal Yet Sufficient Change**: 
    - Focus only on word/phrase-level changes. Modifications must not exceed {x} words.
-   - Do not rephrase entire sentences or change the structure of the text; only change words or phrases necessary to achieve the sentiment shift.s
+   - Do not rephrase entire sentences or change the structure of the text; only change words or phrases necessary to achieve the sentiment shift.
 2. **Definitive Sentiment Shift**:
    - The sentiment must be shifted to {modified_sentiment}.
    - Ensure the sentiment shift is clear, strong, and unambiguous.
@@ -200,38 +201,6 @@ def sentiment_judge(text, model, vllm_model=None, tokenizer=None):
             print(f'Sentiment judge failed!', flush=True)
             return
 
-def word_level_edit_distance(text1, text2):
-    if not isinstance(text1, str) or not isinstance(text2, str):
-        return None
-    
-    # 将文本分割成单词
-    words1 = text1.split()
-    words2 = text2.split()
-    
-    # 初始化动态规划矩阵
-    len1 = len(words1)
-    len2 = len(words2)
-    dp = np.zeros((len1 + 1, len2 + 1), dtype=int)
-    
-    # 填充第一列和第一行
-    for i in range(len1 + 1):
-        dp[i][0] = i
-    for j in range(len2 + 1):
-        dp[0][j] = j
-    
-    # 填充动态规划矩阵
-    for i in range(1, len1 + 1):
-        for j in range(1, len2 + 1):
-            if words1[i - 1] == words2[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1]  # 如果单词相同，不需要操作
-            else:
-                dp[i][j] = min(
-                    dp[i - 1][j] + 1,   # 删除
-                    dp[i][j - 1] + 1,   # 插入
-                    dp[i - 1][j - 1] + 1  # 替换
-                )
-    
-    return dp[len1][len2]
 
 def base_attack(messages, max_tokens=500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
     keep_call = True
@@ -279,15 +248,14 @@ def extract_info(text):
     if not isinstance(text, str):
         print(text, flush=True)
         return None
-    import re
     pattern = r"\[MODIFIED_TEXT\](.*?)(\[/MODIFIED_TEXT\]|(?=\Z))"
     match = re.search(pattern, text, re.DOTALL)
     extracted = match.group(1).strip() if match else None
     return extracted
 
-def spoofing_attack(text, max_tokens = 500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
+def spoofing_attack(text, original_sentiment, max_tokens = 500, max_call=10, model='gpt-4o', vllm_model=None, tokenizer=None):
     # return: original_sentiment, target_modified_sentiment, modified_sentiment, spoofing_text, output_text
-    original_sentiment = sentiment_judge(text, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
+    # original_sentiment = sentiment_judge(text, model=model, vllm_model=vllm_model, tokenizer=tokenizer)
     target_modified_sentiment = decide_modified_sentiment(original_sentiment)
     max_change = int(len(text.split()) * 0.2)
     
@@ -472,3 +440,172 @@ def hate_attack(hate_list, text):
     hate_string = ' '.join(hate_words)
     hate_text = text + ' ' + hate_string
     return hate_text
+
+def vllm_generate_responses(texts, prompts, client, tokenizer):
+    if isinstance(prompts, str):
+        prompts = [prompts] * len(texts)
+    # add prompt to the texts
+    conversations = []
+    for text, prompt in zip(texts, prompts):
+        messages = [
+            {
+                "role": "system", "content": prompt,
+            },
+            {
+                "role": "user",  "content": text.strip()
+            },
+        ]
+        messages = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False  # Setting enable_thinking=False disables thinking mode
+        )
+        conversations.append(messages)
+
+    models = client.models.list()
+    model = models.data[0].id
+    responses = client.completions.create(
+        model=model,
+        prompt=conversations,
+        max_tokens=1000,
+        temperature=0.7,
+        top_p=0.8,
+        extra_body={
+            "top_k": 20, 
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+
+    generated_texts = []
+    for response in responses.choices:
+        output = response.text
+        generated_texts.append(output)
+    return generated_texts
+
+
+def run_attacks_vllm(watermarked_tuples, client, tokenizer):
+    '''
+    Run all attacks for one group of watermarked texts and return the attack results.
+    Args:
+        watermarked_tuples (list): A list of tuples (watermarked texts (rollouts), wm text ids, logprobs) for the same original text.
+    '''
+    hate_phrases_path = "hate_phrase.json"
+    with open(hate_phrases_path, 'r') as f:
+        hate_phrases_list = json.load(f)
+    
+    watermarked_texts = [wm[0] for wm in watermarked_tuples]
+
+    import pdb; pdb.set_trace()  # start attack
+    # paraphrase attack
+    attack_para_texts = vllm_generate_responses(watermarked_texts, paraphrase_prompt, client, tokenizer)
+    import pdb; pdb.set_trace()  # check paraphrase attack results
+
+    # hate spoofing attack
+    attack_hate_texts = [hate_attack(hate_phrases_list, wm_text) for wm_text in watermarked_texts]
+
+    # sentiment spoofing attack
+    ## judge the sentiment of the watermarked texts
+    def _parse_sentiment_response(response):
+        sentiment_match = re.search(
+            r"(?i)Sentiment:\s*(?:\[\[(positive|negative|neutral)\]\]|(positive|negative|neutral))",
+            response.strip()
+        )
+        if sentiment_match:
+            sentiment = sentiment_match.group(1) or sentiment_match.group(2)
+            return sentiment.lower()
+        else:
+            print(f"Failed to parse sentiment response: \n{response}", flush=True)
+            return None
+        
+    import pdb; pdb.set_trace()  # start sentiment spoofing attack
+    max_call = 5
+    for _ in range(max_call):
+        sentiment_judge_response = vllm_generate_responses([watermarked_texts[0]], sentiment_judge_prompt, client, tokenizer)[0]
+        ori_senti = _parse_sentiment_response(sentiment_judge_response)
+        if ori_senti is not None:
+            break
+    import pdb; pdb.set_trace()  # check sentiment judge results
+    if ori_senti is None:
+        return watermarked_tuples, attack_para_texts, [None] * len(watermarked_tuples), attack_hate_texts
+
+    ## generate prompt for each original text based on their sentiment
+    sentiment_attack_prompts = [
+        spoofing_prompt_label.replace('{modified_sentiment}', decide_modified_sentiment(ori_senti))
+                             .replace('{x}', str(int(len(t.split()) * 0.2)))
+        for t in watermarked_texts
+    ]
+    ## generate sentiment attacked texts
+    import pdb; pdb.set_trace()  # start sentiment attack
+    sentiment_attack_responses = vllm_generate_responses(watermarked_texts, sentiment_attack_prompts, client, tokenizer)
+    sentiment_attack_responses_parsed = [extract_info(res) for res in sentiment_attack_responses]
+    import pdb; pdb.set_trace()  # check sentiment attack results
+    ## re-evaluate the sentiment of the attacked texts
+    sentiment_2ndpass = vllm_generate_responses(sentiment_attack_responses_parsed, sentiment_judge_prompt, client, tokenizer)
+    sentiment_2ndpass_parsed = [_parse_sentiment_response(res) for res in sentiment_2ndpass]
+    import pdb; pdb.set_trace()  # check 2nd pass sentiment judge results
+    ## filter out the texts that are not successfully attacked
+    attack_senti_texts = [
+        res if senti != ori_senti else None
+        for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, ori_senti)
+    ]
+
+    return watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
+
+def run_attacks_api(watermarked_tuples):
+    '''
+    Run all attacks for one group of watermarked texts and return the attack results.
+    Args:
+        watermarked_tuples (list): A list of tuples (watermarked texts (rollouts), wm text ids, logprobs) for the same original text.
+    '''
+    hate_phrases_path = "hate_phrase.json"
+    with open(hate_phrases_path, 'r') as f:
+        hate_phrases_list = json.load(f)
+
+    # helper to run all attacks for one wm_text
+    def _run_attacks(wm_tuple, original_sentiment):
+        wm_text = wm_tuple[0]
+        out = {'wm_tuple': wm_tuple}
+        # paraphrase
+        para = paraphrase_attack(wm_text, max_call=1, model='gpt-4o-mini')
+        out['para_text'] = para
+
+        # sentiment spoof
+        senti_res = spoofing_attack(wm_text, original_sentiment, max_call=1, model='gpt-4o-mini')
+        senti = senti_res.get('spoofing_watermarked_text')
+        out['senti_text'] = senti
+
+        # # latter sentiment spoof
+        # orig_sent = senti_res.get('original_sentiment')
+        # tgt_sent = senti_res.get('target_modified_sentiment')
+        # latter_res = latter_spoofing_attack(
+        #     wm_text, orig_sent, tgt_sent, max_call=1, model='gpt-4o-mini'
+        # )
+        # latter = latter_res.get('latter_spoofing_watermarked_text')
+        # out['latter_text'] = latter
+
+        # hate spoof
+        hate = hate_attack(hate_phrases_list, wm_text)
+        out['hate_text'] = hate
+
+        return out
+
+    # wm_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = [], [], [], [], []
+    wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = [], [], [], []
+    # use 1 wm text to judge the sentiment
+    ori_senti = sentiment_judge(watermarked_tuples[0][0], model='gpt-4o-mini')
+    # run in parallel threads
+    with ThreadPoolExecutor(max_workers=min(len(watermarked_tuples), 8)) as exe:
+        futures = [exe.submit(_run_attacks, wm, ori_senti) for wm in watermarked_tuples]
+        for future in as_completed(futures):
+            r = future.result()
+            wm_tuples.append(r['wm_tuple'])
+            attack_para_texts.append(r['para_text'])
+            attack_senti_texts.append(r['senti_text'])
+            # attack_senti_latter_texts.append(r['latter_text'])
+            attack_hate_texts.append(r['hate_text'])
+    
+    # import pdb; pdb.set_trace()  # check attack results
+    # return wm_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts
+    return wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
+

@@ -1,12 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=watermark
+#SBATCH --output=outputs/%j.out
+#SBATCH --error=outputs/%j.err
+#SBATCH --nodes=1
+#SBATCH --partition=gpu
+##SBATCH --reservation=buyuheng 
+#SBATCH --gpus=a100:4
+#SBATCH --mem=64gb
+#SBATCH --time=2-00:00:00
+
+# module load cuda
 set -e
 
-vllm_log_file="vllm-${SLURM_JOB_ID}.log"
+# vllm_log_file="vllm-${SLURM_JOB_ID}.log"
+vllm_log_file=outputs/vllm.log
 
 CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
-  --model "meta-llama/Llama-3.1-8B-Instruct" \
+  --model "Qwen/Qwen3-14B" \
   --tensor-parallel-size 1 \
   --dtype bfloat16 \
-  --max-model-len 500 \
+  --max-model-len 2000 \
   --max-num-seqs 8 \
   --port 8000 > "$vllm_log_file" 2>&1 &
 VLLM_PID=$!
