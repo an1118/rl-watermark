@@ -22,7 +22,7 @@ from models_cl import RobertaForCL
 from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
-    print_and_log, create_reference_model
+    print_and_log, create_reference_model, calculate_roc_auc
 )
 from text_quality_score import _judge_text_quality
 
@@ -44,15 +44,13 @@ class Args:
     """the entity (team) of wandb's project"""
 
     # GRPO training arguments
-    num_iterations: int = 200
+    num_iterations: int = 1
     """the number of iterations (computed in runtime)"""
     batch_size: int = 4  # 16
     """the batch size"""
     num_minibatches: int = 2  # 2
     """the number of mini-batches"""
-    eval_interval: int = 5
-    """the interval of evaluation"""
-    G: int = 8  # 8
+    G: int = 4  # 8
     """the number of rollouts generated for each original text"""
     learning_rate: float = 1e-5
     """the learning rate of the optimizer"""
@@ -65,10 +63,6 @@ class Args:
     beta: float = 0.04
     """KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
         "training speed, but may be numerically unstable for long training runs."""
-    checkpoint_dir: str = None
-    """where to save best embed_map_model checkpoints"""
-    run_name: str = None
-    """the name of the run logged to wandb"""
     log_grad_norm: bool = False
     """if toggled, the gradient norm of the two parts of the loss will be logged to wandb"""
 
@@ -79,7 +73,7 @@ class Args:
     """if toggled, use soft green-red split score"""
     use_median_split: bool = False
     """if toggled, use generated embedding as probabilities for sampling as green tokens"""
-    add_reward_gradient: bool = True
+    add_reward_gradient: bool = False
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
@@ -111,9 +105,20 @@ class Args:
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
     """the name of the dataset"""
+    eval_batch_size: int = 4  # 100
+
+    # General training arguments
+    checkpoint_dir: str = None
+    """where to save best embed_map_model checkpoints"""
+    run_name: str = None
+    """the name of the run logged to wandb"""
+    do_eval: bool = False
+    """if toggled, the model will be evaluated every `eval_steps` steps"""
+    eval_steps: int = 2
+    """the number of steps between evaluations"""
 
     # Sanity check arguments
-    is_sanity_check: bool = True
+    is_sanity_check: bool = False
     """if toggled, this experiment will be a sanity check"""
 
     # to be filled in runtime
@@ -548,6 +553,8 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-reward'), exist_ok=True)
     os.makedirs(os.path.join(args.checkpoint_dir, 'best-all_dims'), exist_ok=True)
     best_mean_detect, best_mean_reward = float("-inf"), float("-inf")  # track best
+    if args.do_eval:
+        best_auc = float("-inf")  # track best auc
 
     print(f"Run name: {args.run_name}")
     print(f"Checkpoint directory: {args.checkpoint_dir}")
@@ -582,9 +589,13 @@ if __name__ == "__main__":
     )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     train_set = load_dataset(args.dataset_name, split='train')
+    train_set = train_set['original']
+    if args.do_eval:
+        valid_set = load_dataset(args.dataset_name, split='valid').select(range(args.eval_batch_size))
+        valid_set = valid_set['original']
     if args.is_sanity_check:
         # use only one batch for sanity check
-        train_set = train_set.select(range(args.batch_size))
+        train_set = train_set[args.batch_size]
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -605,8 +616,8 @@ if __name__ == "__main__":
             all_watermarked_tuples = []  # [B, G], each is (wm_text, wm_text_ids, logprobs)
             ## rollout
             # import pdb; pdb.set_trace()  # check batch['original'] shape -> list [B]
-            for data_idx in tqdm(range(len(batch['original'])), desc="Rolling out one batch"):
-                original_data = batch['original'][data_idx]
+            for data_idx in tqdm(range(len(batch)), desc="Rolling out one batch"):
+                original_data = batch[data_idx]
                 with torch.no_grad():
                     watermarked_tuples = actor.rollout(original_data, args.G)
                 all_watermarked_tuples.append(watermarked_tuples)
@@ -622,8 +633,8 @@ if __name__ == "__main__":
             # ==========debug======== #
             # all_success_para, all_success_senti, all_success_senti_latter = [], [], []
             all_success_para, all_success_senti = [], []
-            for data_idx in tqdm(range(len(batch['original'])), desc="Computing rewards"):
-                original_data = batch['original'][data_idx]
+            for data_idx in tqdm(range(len(batch)), desc="Computing rewards"):
+                original_data = batch[data_idx]
                 watermarked_tuples = all_watermarked_tuples[data_idx]
 
                 result_dict = actor.compute_rewards(original_data, watermarked_tuples, args.binary, detect_score_coefs)  # [G]
@@ -650,24 +661,26 @@ if __name__ == "__main__":
             # Calculate the ratio of groups having all one elements
             one_rewards_group = sum(torch.all(r == 1).item() for r in all_rewards)
 
-            ## save best checkpoint
             mean_detect = torch.mean(torch.cat(all_rewards_detect_overall)).item()
             mean_rewards = torch.mean(torch.cat(all_rewards)).item()
-            if global_step >0:
-                def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
-                    ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
-                    # save the embed_map model + tokenizer
-                    actor.embed_map_model.save_pretrained(ckpt_path)
-                    actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-                    print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}")
-                # save ckpt with best detec scores
-                if mean_detect > best_mean_detect:
-                    best_mean_detect = mean_detect
-                    save_checkpoint(actor, args.checkpoint_dir, "best-all_dims", best_mean_detect, global_step)
-                # save ckpt with best reward
-                if mean_rewards > best_mean_reward:
-                    best_mean_reward = mean_rewards
-                    save_checkpoint(actor, args.checkpoint_dir, "best-reward", best_mean_reward, global_step)
+
+            ## save best checkpoint
+            if not args.do_eval:
+                if global_step >0:
+                    def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
+                        ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
+                        # save the embed_map model + tokenizer
+                        actor.embed_map_model.save_pretrained(ckpt_path)
+                        actor.embed_map_tokenizer.save_pretrained(ckpt_path)
+                        print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}")
+                    # save ckpt with best detec scores
+                    if mean_detect > best_mean_detect:
+                        best_mean_detect = mean_detect
+                        save_checkpoint(actor, args.checkpoint_dir, "best-all_dims", best_mean_detect, global_step)
+                    # save ckpt with best reward
+                    if mean_rewards > best_mean_reward:
+                        best_mean_reward = mean_rewards
+                        save_checkpoint(actor, args.checkpoint_dir, "best-reward", best_mean_reward, global_step)
 
             if global_step != -1:
                 # record detailed rewards
@@ -706,7 +719,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                mb_original_text = [batch['original'][idx] for idx in mb_inds]  # [mb_size]
+                mb_original_text = [batch[idx] for idx in mb_inds]  # [mb_size]
                 mb_watermarked_tuples = [all_watermarked_tuples[idx] for idx in mb_inds]  # [mb_size, G*(wm_texts, wm_text_ids, logprobs)]
                 mb_attack_texts = [all_attack_texts[idx] for idx in mb_inds]  # [mb_size, {attack_name: G*[attacks]}]
                 mb_advantages = b_advantages[mb_inds]  # [mb_size, G]
@@ -847,6 +860,70 @@ if __name__ == "__main__":
                 # print(f"Optimization time: {optimization_time:.4f} seconds")
 
                 global_step += 1
+
+                # Do evaluation if instructed to do so
+                if args.do_eval and global_step % args.eval_steps == 0:
+                    valid_ori_scores, valid_wm_scores, valid_para_scores, valid_senti_scores, valid_hate_scores = [], [], [], [], []
+                    for data_idx in tqdm(range(len(valid_set)), desc="Evaluating valid batch"):
+                        # import pdb; pdb.set_trace()  # start evaluation
+                        valid_original_data = valid_set[data_idx]
+                        # watermarking
+                        with torch.no_grad():
+                            valid_watermarked_tuples = actor.rollout(valid_original_data, 1)
+                        # import pdb; pdb.set_trace()  # check if valid_watermarked_tuples shape: [(wm_text, wm_text_ids, logprobs)]
+                        # attack
+                        valid_watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks(valid_watermarked_tuples, actor.attack_client, actor.attack_tokenizer)
+                        # import pdb; pdb.set_trace()  # check returned shapes
+                        assert len(valid_watermarked_tuples) == 1 and len(attack_para_texts) == 1 and len(attack_senti_texts) == 1 and len(attack_hate_texts) == 1, \
+                            "valid_watermarked_tuples, attack_para_texts, attack_senti_texts, and attack_hate_texts must all have length 1"
+                        # detect
+                        original_score = actor.detect(original_text, has_gradient=False)
+                        valid_ori_scores.append(original_score)
+                        wm_score = actor.detect(valid_watermarked_tuples[0][0], has_gradient=False)
+                        valid_wm_scores.append(wm_score)
+                        para_score = actor.detect(attack_para_texts[0], has_gradient=False) if attack_para_texts[0] else None
+                        valid_para_scores.append(para_score)
+                        senti_score = actor.detect(attack_senti_texts[0], has_gradient=False) if attack_senti_texts[0] else None
+                        valid_senti_scores.append(senti_score)
+                        hate_score = actor.detect(attack_hate_texts[0], has_gradient=False) if attack_hate_texts[0] else None
+                        valid_hate_scores.append(hate_score)
+                    # Log the median of each score to wandb
+                    def safe_median(x):
+                        x = [v for v in x if v is not None]
+                        if isinstance(x[0], torch.Tensor):
+                            x = [v.item() for v in x]
+                        return float(np.median(x))
+                    wandb.log({
+                        "eval/median_ori_score": safe_median(valid_ori_scores),
+                        "eval/median_wm_score": safe_median(valid_wm_scores),
+                        "eval/median_para_score": safe_median(valid_para_scores),
+                        "eval/median_senti_score": safe_median(valid_senti_scores),
+                        "eval/median_hate_score": safe_median(valid_hate_scores),
+                    }, step=global_step)
+                    # Compute and log the auc for each dimension
+                    auc_detect, _, _ = calculate_roc_auc(valid_ori_scores, valid_wm_scores)
+                    auc_para, _, _ = calculate_roc_auc(valid_ori_scores, valid_para_scores)
+                    auc_senti, _, _ = calculate_roc_auc(valid_ori_scores, valid_senti_scores)
+                    auc_hate, _, _ = calculate_roc_auc(valid_ori_scores, valid_hate_scores)
+                    wandb.log({
+                        "eval/auc_detect": auc_detect,
+                        "eval/auc_para": auc_para,
+                        "eval/auc_senti": auc_senti,
+                        "eval/auc_hate": auc_hate,
+                    }, step=global_step)
+                    
+                    # save the best checkpoint if needed
+                    overall_auc = (auc_detect + auc_para + (1 - auc_senti) + (1 - auc_hate)) / 4
+                    def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
+                        ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
+                        # save the embed_map model + tokenizer
+                        actor.embed_map_model.save_pretrained(ckpt_path)
+                        actor.embed_map_tokenizer.save_pretrained(ckpt_path)
+                        print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
+                    # save ckpt with best overall auc
+                    if overall_auc > best_auc:
+                        best_auc = overall_auc
+                        save_checkpoint(actor, args.checkpoint_dir, "best-overall_auc", best_mean_detect, global_step)
 
                 # TRY NOT TO MODIFY: record rewards for plotting purposes
                 # writer.add_scalar("learning_rate", optimizer.param_groups[0]["lr"], global_step)

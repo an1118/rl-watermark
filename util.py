@@ -6,6 +6,7 @@ import json
 import numpy as np
 import wandb
 from copy import deepcopy
+from sklearn.metrics import roc_curve, roc_auc_score
 
 from attack import run_attacks_vllm, run_attacks_api
 
@@ -125,7 +126,7 @@ def fill_na(values):
 
 
 def run_attacks(watermarked_tuples, client=None, tokenizer=None):
-    import pdb; pdb.set_trace()  # check attack model
+    # import pdb; pdb.set_trace()  # check attack model
     if client is not None and tokenizer is not None:
         wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_vllm(watermarked_tuples, client, tokenizer)
     else:
@@ -182,3 +183,23 @@ def create_reference_model(model):
     for param in ref_model.parameters():
         param.requires_grad = False
     return ref_model.eval()
+
+
+def calculate_roc_auc(negative_scores, positive_scores):
+    negative_scores = [s for s in negative_scores if s is not None]
+    positive_scores = [s for s in positive_scores if s is not None]
+
+    negative_scores = [s.item() if torch.is_tensor(s) else float(s) for s in negative_scores]
+    positive_scores = [s.item() if torch.is_tensor(s) else float(s) for s in positive_scores]
+    
+    negative_scores = np.array(negative_scores)
+    positive_scores = np.array(positive_scores)
+
+    # Create labels, 0 for human-written, 1 for machine-generated
+    labels = np.array([0] * len(negative_scores) + [1] * len(positive_scores))
+    # Combine all scores
+    scores = np.concatenate((negative_scores, positive_scores))
+    # Calculate AUC
+    auc = roc_auc_score(labels, scores)
+    fpr, tpr, _ = roc_curve(labels, scores)
+    return auc, fpr, tpr
