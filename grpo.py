@@ -77,7 +77,7 @@ class Args:
     """if toggled, the detectability rewards will be binary"""
     use_soft_split: bool = False
     """if toggled, use soft green-red split score"""
-    use_median_split: bool = True
+    use_median_split: bool = False
     """if toggled, use generated embedding as probabilities for sampling as green tokens"""
     add_reward_gradient: bool = True
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
