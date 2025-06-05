@@ -445,7 +445,7 @@ def run_attacks_vllm(watermarked_tuples, client, tokenizer):
     ## filter out the texts that are not successfully attacked
     attack_senti_texts = [
         res if senti != ori_senti else None
-        for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, ori_senti)
+        for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, [ori_senti] * len(sentiment_2ndpass_parsed))
     ]
 
     return watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
