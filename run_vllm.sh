@@ -120,7 +120,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --eval_steps $eval_steps \
   --eval_batch_size $eval_batch_size \
   --attack_model_name "Qwen/Qwen3-14B" \
-  --attack_model_url "http://localhost:8000/v1"
+  --attack_model_url "http://localhost:8000/v1" \
   $( [ "$is_sanity_check" = true ] && echo "--is_sanity_check" ) \
   $( [ "$do_eval" = true ] && echo "--do_eval" ) \
   $( [ "$binary" = true ] && echo "--binary" ) \

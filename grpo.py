@@ -113,7 +113,7 @@ class Args:
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
     """the name of the run logged to wandb"""
-    do_eval: bool = False
+    do_eval: bool = True
     """if toggled, the model will be evaluated every `eval_steps` steps"""
     eval_steps: int = 2
     """the number of steps between evaluations"""
@@ -304,12 +304,20 @@ class Actor(nn.Module):
         return green_red_splits
 
     def _next_token_entropy(self, logits):
-        # logits = self.watermark_model(input_ids)
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        mask = probs > 0
-        entropy = -torch.sum(probs[mask] * torch.log(probs[mask]))
-        return entropy
+        """
+        Calculate the entropy for all tokens in each sequence in the batch.
 
+        Args:
+            logits (torch.Tensor): Logits of shape [B, L, V].
+
+        Returns:
+            torch.Tensor: Entropy for each token in each sequence, shape [B, L].
+        """
+        # logits: [B, L, V]
+        probs = torch.nn.functional.softmax(logits, dim=-1)  # [B, L, V]
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)  # [B, L]
+        return entropy
+    
     def detect(self, texts, has_gradient=True):
         if isinstance(texts, list):
             # Replace None elements in texts with '.'
@@ -325,36 +333,73 @@ class Actor(nn.Module):
         if not has_gradient:
             green_red_splits = [g.detach() for g in green_red_splits]
 
+        # start_time = time.time()
+        # Tokenize the batch
+        inputs = self.watermark_tokenizer(
+            texts,
+            return_tensors='pt',
+            add_special_tokens=False,
+            padding=True,
+        ).to(self.watermark_model.device)
+        # tokenization_time = time.time() - start_time
+        # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
+
         scores = []  # [B]
-        for text, green_red_split in zip(texts, green_red_splits):
-            inputs = self.watermark_tokenizer(
-                text, 
-                return_tensors='pt',
-                add_special_tokens=False,
-            ).to(self.watermark_model.device)
-            # import pdb; pdb.set_trace()  # check inputs shape
+        mini_batch_size = 32  # You can adjust this value as needed
+        for start in range(0, len(texts), mini_batch_size):
+            end = min(start + mini_batch_size, len(texts))
+            batch_inputs = {k: v[start:end] for k, v in inputs.items()}
+            batch_green_red_splits = green_red_splits[start:end]
 
-            logits = self.watermark_model(inputs['input_ids'], attention_mask=inputs['attention_mask'], logits_to_keep=inputs['input_ids'].size(1)).logits
-            logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
+            # start_time = time.time()
+            # Compute logits for the whole mini batch
+            logits = self.watermark_model(
+                batch_inputs['input_ids'],
+                attention_mask=batch_inputs['attention_mask'],
+                logits_to_keep=batch_inputs['input_ids'].size(1)
+            ).logits
+            logits = logits[:, :-1, :]  # (miniB, L-1, V)
+            # logits_time = time.time() - start_time
+            # print(f"Logits computation time: {logits_time:.4f} seconds", flush=True)
 
-            score = []  # [L]
-            for i, token_id in enumerate(inputs['input_ids'][0]):
-                if i <= self.measure_threshold:
-                    s = green_red_split[token_id]
-                    score.append(s)
-                else:
-                    measure_entropy = self._next_token_entropy(logits[0, i - 1, :])  # first token doesn't have logits
-                    if measure_entropy >= self.alpha:
-                        s = green_red_split[token_id]
-                        score.append(s)
-            # check gradient
-            score = torch.stack(score)  # [seq_len]
-            normalized_score = torch.sum(score) / score.size(0)
-            scores.append(normalized_score)
+            # start_time = time.time()
+            # Compute entropy
+            entropy = self._next_token_entropy(logits)  # [miniB, L-1]
+            # entropy_time = time.time() - start_time
+            # print(f"Entropy computation time: {entropy_time:.4f} seconds", flush=True)
 
+            # start_time = time.time()
+            entropy_mask = (entropy > self.alpha).long()
+            # Add a column of ones at the beginning of entropy_mask
+            ones_col = torch.ones(entropy_mask.size(0), 1, dtype=entropy_mask.dtype, device=entropy_mask.device)
+            entropy_mask = torch.cat([ones_col, entropy_mask], dim=1)
+            # Set the first self.measure_threshold entries in each row to 1
+            entropy_mask[:, :self.measure_threshold] = 1
+
+            watermark_mask = batch_inputs['attention_mask'] * entropy_mask
+            # mask_time = time.time() - start_time
+            # print(f"Mask computation time: {mask_time:.4f} seconds", flush=True)
+
+            # start_time = time.time()
+            green_red_splits_tensor = torch.stack(batch_green_red_splits)  # [miniB, vocab_size]
+            # Use gather to index: expand input_ids to [miniB, L, 1] for gather
+            token_scores = torch.gather(
+                green_red_splits_tensor, 1, batch_inputs['input_ids']
+            )
+            # token_score_time = time.time() - start_time
+            # print(f"Token score computation time: {token_score_time:.4f} seconds", flush=True)
+            # start_time = time.time()
+            token_scores = token_scores * watermark_mask  # [miniB, L], mask out tokens that are not watermarked
+            scores_ = torch.sum(token_scores, dim=1) / watermark_mask.sum(dim=1)  # [miniB]
+            scores.append(scores_)
+            # score_time = time.time() - start_time
+            # print(f"Score computation time: {score_time:.4f} seconds", flush=True)
+            # print("==========================", flush=True)
+            del logits, batch_inputs  # free memory
+
+        scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
         # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
-        del logits, inputs  # free memory
         return scores
 
     def compute_rewards(
