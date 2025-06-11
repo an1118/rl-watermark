@@ -10,6 +10,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pdb
+import time
 
 paraphrase_prompt = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -340,6 +341,7 @@ def hate_attack(hate_list, text):
 def vllm_generate_responses(texts, prompts, client, tokenizer):
     if isinstance(texts, str): 
         texts = [texts]
+    assert isinstance(texts, list) and all(isinstance(t, str) for t in texts), "texts must be a list of strings"
     if isinstance(prompts, str):
         prompts = [prompts] * len(texts)
     # add prompt to the texts
@@ -366,7 +368,7 @@ def vllm_generate_responses(texts, prompts, client, tokenizer):
     responses = client.completions.create(
         model=model,
         prompt=conversations,
-        max_tokens=1000,
+        max_tokens=800,
         temperature=0.7,
         top_p=0.8,
         extra_body={
@@ -382,73 +384,132 @@ def vllm_generate_responses(texts, prompts, client, tokenizer):
     return generated_texts
 
 
-def run_attacks_vllm(watermarked_tuples, client, tokenizer):
+def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
     '''
     Run all attacks for one group of watermarked texts and return the attack results.
     Args:
-        watermarked_tuples (list): A list of tuples (watermarked texts (rollouts), wm text ids, logprobs) for the same original text.
+        watermarked_tuples (list): [B, G], each is (wm_text, wm_text_ids, logprobs)
+        attack_flags (dict): A dictionary indicating which attacks to run, e.g., {'para': True, 'senti': True, 'hate': True}.
     '''
+    attack_flags = {'para': True, 'senti': True, 'hate': True}  # TODO
     hate_phrases_path = "hate_phrase.json"
     with open(hate_phrases_path, 'r') as f:
         hate_phrases_list = json.load(f)
     
-    watermarked_texts = [wm[0] for wm in watermarked_tuples]
+    def regroup_list(flat_list, batch, group):
+        """
+        Reshape a flat list of length batch*group into a list of (batch) lists, each of length (group).
+        """
+        assert len(flat_list) == batch * group, "Input list length does not match B*G"
+        return [flat_list[i * group:(i + 1) * group] for i in range(batch)]
+    
+    B = len(watermarked_tuples)
+    G = len(watermarked_tuples[0])
+    watermarked_texts = [t[0] for b in watermarked_tuples for t in b]  # flatten all watermarked texts
 
-    # import pdb; pdb.set_trace()  # start attack
     # paraphrase attack
-    attack_para_texts = vllm_generate_responses(watermarked_texts, paraphrase_prompt, client, tokenizer)
-    # import pdb; pdb.set_trace()  # check paraphrase attack results
+    if attack_flags['para']:
+        start_time = time.time()
+        attack_para_texts = vllm_generate_responses(watermarked_texts, paraphrase_prompt, client, tokenizer)  # [B*G]
+        # attack_para_texts = regroup_list(attack_para_texts, B, G)  # regroup into [B, G]
+        elapsed_time = time.time() - start_time
+        print(f"\nParaphrase attack took {elapsed_time:.2f} seconds.", flush=True)
+        # import pdb; pdb.set_trace()  # check paraphrase attack results
+    else:
+        attack_para_texts = None
 
     # hate spoofing attack
-    attack_hate_texts = [hate_attack(hate_phrases_list, wm_text) for wm_text in watermarked_texts]
+    if attack_flags['hate']:
+        attack_hate_texts = [hate_attack(hate_phrases_list, wm_text) for wm_text in watermarked_texts]
+        # attack_hate_texts = regroup_list(attack_hate_texts, B, G)
+    else:
+        attack_hate_texts = None
 
     # sentiment spoofing attack
-    ## judge the sentiment of the watermarked texts
-    def _parse_sentiment_response(response):
-        sentiment_match = re.search(
-            r"(?i)Sentiment:\s*(?:\[\[(positive|negative|neutral)\]\]|(positive|negative|neutral))",
-            response.strip()
-        )
-        if sentiment_match:
-            sentiment = sentiment_match.group(1) or sentiment_match.group(2)
-            return sentiment.lower()
-        else:
-            print(f"Failed to parse sentiment response: \n{response}", flush=True)
-            return None
+    def _parse_sentiment_response(responses):
+        # responses: list of strings
+        sentiments = []
+        for response in responses:
+            sentiment_match = re.search(
+                r"(?i)(?:\[\[(positive|negative|neutral)\]\]|(positive|negative|neutral))",
+                response.strip()
+            )
+            if sentiment_match:
+                sentiment = sentiment_match.group(1) or sentiment_match.group(2)
+                sentiments.append(sentiment.lower())
+            else:
+                print(f"Failed to parse sentiment response: \n{response}", flush=True)
+                sentiments.append(None)
+        return sentiments
         
-    # import pdb; pdb.set_trace()  # start sentiment spoofing attack
-    max_call = 5
-    for _ in range(max_call):
-        sentiment_judge_response = vllm_generate_responses([watermarked_texts[0]], sentiment_judge_prompt, client, tokenizer)[0]
+    if attack_flags['senti']:
+        ## judge the sentiment of the watermarked texts
+        # import pdb; pdb.set_trace()  # start sentiment spoofing attack
+        first_of_each_group = [watermarked_texts[i * G] for i in range(B)]
+        start_time = time.time()
+        sentiment_judge_response = vllm_generate_responses(first_of_each_group, sentiment_judge_prompt, client, tokenizer)
         ori_senti = _parse_sentiment_response(sentiment_judge_response)
-        if ori_senti is not None:
-            break
-    # import pdb; pdb.set_trace()  # check original text's sentiment judge results
-    if ori_senti is None:
-        return watermarked_tuples, attack_para_texts, [None] * len(watermarked_tuples), attack_hate_texts
+        # For those in ori_senti that are None, gather all and re-judge their sentiment together
+        max_call = 2
+        none_indices = [idx for idx, sentiment in enumerate(ori_senti) if sentiment is None]
+        if none_indices:
+            wm_texts_to_judge = [first_of_each_group[idx] for idx in none_indices]
+            for _ in range(max_call):
+                print(f"Retrying sentiment judge for {len(none_indices)} texts (attempt {_+1}/{max_call})", flush=True)
+                responses = vllm_generate_responses(wm_texts_to_judge, sentiment_judge_prompt, client, tokenizer)
+                parsed = _parse_sentiment_response(responses)
+                for i, p in enumerate(parsed):
+                    if p is not None:
+                        ori_senti[none_indices[i]] = p
+                # Prepare for next round only with those still None
+                none_indices = [idx for idx in none_indices if ori_senti[idx] is None]
+                print(f"{len(none_indices)} sentiment(s) still not parsed correctly.", flush=True)
+                if not none_indices:
+                    break
+                wm_texts_to_judge = [first_of_each_group[idx] for idx in none_indices]
+        # import pdb; pdb.set_trace()  # check original text's sentiment judge results, ori_senti shape:[B]
+        ori_senti = [s for s in ori_senti for _ in range(G)]
+        # Fill None in ori_senti with "neutral"
+        ori_senti = [s if s is not None else "neutral" for s in ori_senti]
+        elapsed_time = time.time() - start_time
+        print(f"1st pass sentiment judge took {elapsed_time:.2f} seconds.", flush=True)
 
-    ## generate prompt for each original text based on their sentiment
-    sentiment_attack_prompts = [
-        spoofing_prompt_label.replace('{modified_sentiment}', decide_modified_sentiment(ori_senti))
-                             .replace('{x}', str(int(len(t.split()) * 0.2)))
-        for t in watermarked_texts
-    ]
-    ## generate sentiment attacked texts
-    # import pdb; pdb.set_trace()  # start sentiment attack
-    sentiment_attack_responses = vllm_generate_responses(watermarked_texts, sentiment_attack_prompts, client, tokenizer)
-    sentiment_attack_responses_parsed = [extract_info(res) for res in sentiment_attack_responses]
-    # import pdb; pdb.set_trace()  # check sentiment attack results
-    ## re-evaluate the sentiment of the attacked texts
-    sentiment_2ndpass = vllm_generate_responses(sentiment_attack_responses_parsed, sentiment_judge_prompt, client, tokenizer)
-    sentiment_2ndpass_parsed = [_parse_sentiment_response(res) for res in sentiment_2ndpass]
-    # import pdb; pdb.set_trace()  # check 2nd pass sentiment judge results
-    ## filter out the texts that are not successfully attacked
-    attack_senti_texts = [
-        res if senti != ori_senti else None
-        for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, [ori_senti] * len(sentiment_2ndpass_parsed))
-    ]
+        ## generate prompt for each original text based on their sentiment
+        sentiment_attack_prompts = [
+            spoofing_prompt_label.replace('{modified_sentiment}', decide_modified_sentiment(s))
+                                .replace('{x}', str(int(len(t.split()) * 0.2)))
+            for t, s in zip(watermarked_texts, ori_senti)
+        ]
+        ## generate sentiment attacked texts
+        start_time = time.time()
+        sentiment_attack_responses = vllm_generate_responses(watermarked_texts, sentiment_attack_prompts, client, tokenizer)
+        sentiment_attack_responses_parsed = [extract_info(res) for res in sentiment_attack_responses]
+        elapsed_time = time.time() - start_time
+        print(f"Sentiment attack took {elapsed_time:.2f} seconds.", flush=True)
+        # import pdb; pdb.set_trace()  # check super short texts & empty texts: didn't find such cases  'sum(1 for x in sentiment_attack_responses_parsed if x is None or len(x.split()) <= 20)'
+        ## re-evaluate the sentiment of the attacked texts
+        start_time = time.time()
+        sentiment_2ndpass = vllm_generate_responses(sentiment_attack_responses_parsed, sentiment_judge_prompt, client, tokenizer)
+        sentiment_2ndpass_parsed = _parse_sentiment_response(sentiment_2ndpass)
+        elapsed_time = time.time() - start_time
+        print(f"2nd pass sentiment judge took {elapsed_time:.2f} seconds.", flush=True)
+        # import pdb; pdb.set_trace()  # check #None in 2nd pass sentiment judge results: 0  'sum(1 for x in sentiment_2ndpass_parsed if x is None)'
+        ## filter out the texts that are not successfully attacked
+        attack_senti_texts = [
+            res if senti != ori_senti else None
+            for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, [ori_senti] * len(sentiment_2ndpass_parsed))
+        ]
+        # attack_senti_texts = regroup_list(attack_senti_texts, B, G)  # regroup into [B, G]
+    else:
+        attack_senti_texts = None
 
-    return watermarked_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
+    attack_texts = {
+        'para': attack_para_texts,
+        'senti': attack_senti_texts,
+        'hate': attack_hate_texts,
+    }
+    # import pdb; pdb.set_trace()  # check if attack results match wm texts, shape of different attack texts: [B*G]
+    return attack_texts
 
 def run_attacks_api(watermarked_tuples):
     '''

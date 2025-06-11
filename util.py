@@ -107,8 +107,13 @@ def sign_ste(x):
     return x + x.sign() - x_nogradient
 
 
-# straight-through estimate step function
+# straight-through estimate step function with per-row threshold
 def step_ste(x, threshold):
+    """
+    x: [B, hidden_size] tensor
+    threshold: [B] tensor, one threshold per row
+    """
+    threshold = threshold.view(-1, 1)  # [B, 1] for broadcasting
     hard = (x > threshold).float()
     return hard + x - x.detach()
 
@@ -125,13 +130,19 @@ def fill_na(values):
     return [avg_value if v is None else v for v in values]
 
 
-def run_attacks(watermarked_tuples, client=None, tokenizer=None):
-    # import pdb; pdb.set_trace()  # check attack model
+def run_attacks(watermarked_tuples, detect_score_coefs, client=None, tokenizer=None):
+    """
+    Args:
+        watermarked_tuples (list): [B, G], each is (wm_text, wm_text_ids, logprobs)
+        detect_score_coefs (dict): include the specific attack if corresponding value is not zero
+    """
+    attack_flags = {k: bool(v) for k, v in detect_score_coefs.items() if k not in ('ori', 'wm')}
     if client is not None and tokenizer is not None:
-        wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_vllm(watermarked_tuples, client, tokenizer)
-    else:
-        wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_api(watermarked_tuples)
-    return wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts
+        attack_texts = run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer)
+    else:  # TODO
+        raise NotImplementedError("run_attacks_api is not implemented for this case")
+        # wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_api(watermarked_tuples)
+    return attack_texts
 
 
 def print_and_log(
@@ -153,11 +164,11 @@ def print_and_log(
         f"Step: {global_step}, "
         # f"relevance: {np.mean(all_rewards_relevance):.4f}, "
         # f"text_quality: {np.mean(all_rewards_text_quality):.4f}, "
-        f"detect_ori: {torch.mean(torch.cat(all_rewards_detect_ori)).item():.4f}, "
-        f"detect_wm: {torch.mean(torch.cat(all_rewards_detect_wm)).item():.4f}, "
-        f"detect_para: {torch.mean(torch.cat(all_rewards_detect_para)).item():.4f}, "
-        f"detect_senti: {torch.mean(torch.cat(all_rewards_detect_senti)).item():.4f}, "
-        f"detect_hate: {torch.mean(torch.cat(all_rewards_detect_hate)).item():.4f}, "
+        f"detect_ori: {torch.mean(all_rewards_detect_ori).item():.4f}, "
+        f"detect_wm: {torch.mean(all_rewards_detect_wm).item():.4f}, "
+        f"detect_para: {torch.mean(all_rewards_detect_para).item():.4f}, "
+        f"detect_senti: {torch.mean(all_rewards_detect_senti).item():.4f}, "
+        f"detect_hate: {torch.mean(all_rewards_detect_hate).item():.4f}, "
         , flush=True
     )
     
@@ -165,14 +176,14 @@ def print_and_log(
         "train/overall_reward": mean_rewards,
         # "train/reward/relevance_scores": np.mean(all_rewards_relevance),
         # "train/reward/text_quality_scores": np.mean(all_rewards_text_quality),
-        "train/reward/detect_ori": torch.mean(torch.cat(all_rewards_detect_ori)).item(),
-        "train/reward/detect_wm": torch.mean(torch.cat(all_rewards_detect_wm)).item(),
-        "train/reward/detect_para": torch.mean(torch.cat(all_rewards_detect_para)).item(),
-        "train/reward/detect_senti": torch.mean(torch.cat(all_rewards_detect_senti)).item(),
-        "train/reward/detect_hate": torch.mean(torch.cat(all_rewards_detect_hate)).item(),
+        "train/reward/detect_ori": torch.mean(all_rewards_detect_ori).item(),
+        "train/reward/detect_wm": torch.mean(all_rewards_detect_wm).item(),
+        "train/reward/detect_para": torch.mean(all_rewards_detect_para).item(),
+        "train/reward/detect_senti": torch.mean(all_rewards_detect_senti).item(),
+        "train/reward/detect_hate": torch.mean(all_rewards_detect_hate).item(),
         #==========debug======== #
-        "train/success_rate_para": np.mean(all_success_para),
-        "train/success_rate_senti": np.mean(all_success_senti),
+        "train/success_rate_para": all_success_para,
+        "train/success_rate_senti": all_success_senti,
         "train/zero_rewards_group": zero_rewards_group,
         "train/one_rewards_group": one_rewards_group,
     }, step=global_step)
@@ -203,3 +214,12 @@ def calculate_roc_auc(negative_scores, positive_scores):
     auc = roc_auc_score(labels, scores)
     fpr, tpr, _ = roc_curve(labels, scores)
     return auc, fpr, tpr
+
+
+def regroup_list(flat_list, batch, group):
+    """
+    Reshape a flat list of length batch*group into a list of (batch) lists, each of length (group).
+    """
+    assert len(flat_list) == batch * group, "Input list length does not match B*G"
+    return [flat_list[i * group:(i + 1) * group] for i in range(batch)]
+
