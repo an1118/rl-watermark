@@ -547,6 +547,9 @@ if __name__ == "__main__":
         if args.attack_model_name:
             args.run_name += f"-attack_{args.attack_model_name.split('/')[-1]}"
 
+    print(args)
+    import pdb; pdb.set_trace()  # check args
+    
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
         current_date = time.strftime("%m%d")
