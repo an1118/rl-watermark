@@ -484,9 +484,9 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         start_time = time.time()
         sentiment_attack_responses = vllm_generate_responses(watermarked_texts, sentiment_attack_prompts, client, tokenizer)
         sentiment_attack_responses_parsed = [extract_info(res) for res in sentiment_attack_responses]
-        # Replace None in sentiment_attack_responses_parsed with "@@Empty Text@@"
+        # Replace None in sentiment_attack_responses_parsed with special tokens
         sentiment_attack_responses_parsed = [
-            res if res is not None else "@@Empty Text@@"
+            res if res is not None else "@@I am very happy.@@"
             for res in sentiment_attack_responses_parsed
         ]
         elapsed_time = time.time() - start_time
@@ -501,7 +501,7 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         # import pdb; pdb.set_trace()  # check #None in 2nd pass sentiment judge results: 0  'sum(1 for x in sentiment_2ndpass_parsed if x is None)'
         ## filter out the texts that are not successfully attacked
         attack_senti_texts = [
-            res if senti != ori_senti and res != "@@Empty Text@@" else None
+            res if senti != ori_senti and res != "@@I am very happy.@@" else None
             for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, ori_sentis)
         ]
         # attack_senti_texts = regroup_list(attack_senti_texts, B, G)  # regroup into [B, G]
