@@ -113,7 +113,7 @@ class Args:
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
     """the name of the run logged to wandb"""
-    do_eval: bool = True
+    do_eval: bool = False
     """if toggled, the model will be evaluated every `eval_steps` steps"""
     eval_steps: int = 2
     """the number of steps between evaluations"""

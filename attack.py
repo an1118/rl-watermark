@@ -448,10 +448,10 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         first_of_each_group = [watermarked_texts[i * G] for i in range(B)]
         start_time = time.time()
         sentiment_judge_response = vllm_generate_responses(first_of_each_group, sentiment_judge_prompt, client, tokenizer)
-        ori_senti = _parse_sentiment_response(sentiment_judge_response)
-        # For those in ori_senti that are None, gather all and re-judge their sentiment together
+        ori_sentis = _parse_sentiment_response(sentiment_judge_response)
+        # For those in ori_sentis that are None, gather all and re-judge their sentiment together
         max_call = 2
-        none_indices = [idx for idx, sentiment in enumerate(ori_senti) if sentiment is None]
+        none_indices = [idx for idx, sentiment in enumerate(ori_sentis) if sentiment is None]
         if none_indices:
             wm_texts_to_judge = [first_of_each_group[idx] for idx in none_indices]
             for _ in range(max_call):
@@ -460,17 +460,17 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
                 parsed = _parse_sentiment_response(responses)
                 for i, p in enumerate(parsed):
                     if p is not None:
-                        ori_senti[none_indices[i]] = p
+                        ori_sentis[none_indices[i]] = p
                 # Prepare for next round only with those still None
-                none_indices = [idx for idx in none_indices if ori_senti[idx] is None]
+                none_indices = [idx for idx in none_indices if ori_sentis[idx] is None]
                 print(f"{len(none_indices)} sentiment(s) still not parsed correctly.", flush=True)
                 if not none_indices:
                     break
                 wm_texts_to_judge = [first_of_each_group[idx] for idx in none_indices]
-        # import pdb; pdb.set_trace()  # check original text's sentiment judge results, ori_senti shape:[B]
-        ori_senti = [s for s in ori_senti for _ in range(G)]
-        # Fill None in ori_senti with "neutral"
-        ori_senti = [s if s is not None else "neutral" for s in ori_senti]
+        # import pdb; pdb.set_trace()  # check original text's sentiment judge results, ori_sentis shape:[B]
+        ori_sentis = [s for s in ori_sentis for _ in range(G)]
+        # Fill None in ori_sentis with "neutral"
+        ori_sentis = [s if s is not None else "neutral" for s in ori_sentis]
         elapsed_time = time.time() - start_time
         print(f"1st pass sentiment judge took {elapsed_time:.2f} seconds.", flush=True)
 
@@ -478,12 +478,17 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         sentiment_attack_prompts = [
             spoofing_prompt_label.replace('{modified_sentiment}', decide_modified_sentiment(s))
                                 .replace('{x}', str(int(len(t.split()) * 0.2)))
-            for t, s in zip(watermarked_texts, ori_senti)
+            for t, s in zip(watermarked_texts, ori_sentis)
         ]
         ## generate sentiment attacked texts
         start_time = time.time()
         sentiment_attack_responses = vllm_generate_responses(watermarked_texts, sentiment_attack_prompts, client, tokenizer)
         sentiment_attack_responses_parsed = [extract_info(res) for res in sentiment_attack_responses]
+        # Replace None in sentiment_attack_responses_parsed with "@@Empty Text@@"
+        sentiment_attack_responses_parsed = [
+            res if res is not None else "@@Empty Text@@"
+            for res in sentiment_attack_responses_parsed
+        ]
         elapsed_time = time.time() - start_time
         print(f"Sentiment attack took {elapsed_time:.2f} seconds.", flush=True)
         # import pdb; pdb.set_trace()  # check super short texts & empty texts: didn't find such cases  'sum(1 for x in sentiment_attack_responses_parsed if x is None or len(x.split()) <= 20)'
@@ -496,8 +501,8 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         # import pdb; pdb.set_trace()  # check #None in 2nd pass sentiment judge results: 0  'sum(1 for x in sentiment_2ndpass_parsed if x is None)'
         ## filter out the texts that are not successfully attacked
         attack_senti_texts = [
-            res if senti != ori_senti else None
-            for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, [ori_senti] * len(sentiment_2ndpass_parsed))
+            res if senti != ori_senti and res != "@@Empty Text@@" else None
+            for res, senti, ori_senti in zip(sentiment_attack_responses_parsed, sentiment_2ndpass_parsed, ori_sentis)
         ]
         # attack_senti_texts = regroup_list(attack_senti_texts, B, G)  # regroup into [B, G]
     else:
