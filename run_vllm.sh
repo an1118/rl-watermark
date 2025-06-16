@@ -13,7 +13,6 @@
 set -e
 
 vllm_log_file="outputs/${SLURM_JOB_ID}.vllm"
-# vllm_log_file=outputs/vllm.log
 
 CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
   --model "Qwen/Qwen3-14B" \
@@ -40,7 +39,7 @@ for i in {1..10}; do
     READY=1
     break
   fi
-  sleep 10
+  sleep 20
 done
 
 if [ "$READY" -ne 1 ]; then
@@ -66,18 +65,20 @@ use_median_split=false
 add_reward_gradient=true
 add_gr_loss=false
 detect_score_coefs_ori=1
+ori_score_strategy="dynamic"  # [raw, abs, dynamic, gap]
 target_ori_score=0.5
+growth_rate=1.0
 detect_score_coefs_wm=1
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
 
 do_eval=true
-eval_steps=10  # 20
+eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="batch$batch_size-nmini$num_minibatches-G$G-ori${detect_score_coefs_ori}(${target_ori_score})wm${detect_score_coefs_wm}senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}-clip$clip_coef-beta$beta"
+run_id="batch$batch_size-nmini$num_minibatches-G$G-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}-clip$clip_coef-beta$beta"
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"
 fi
@@ -95,6 +96,12 @@ if [ "$add_reward_gradient" = true ]; then
 fi
 if [ "$add_gr_loss" = true ]; then
     run_id="${run_id}-gr_loss"
+fi
+if [ "$ori_score_strategy" = "abs" ]; then
+  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${target_ori_score})/")
+fi
+if [ "$ori_score_strategy" = "dynamic" ]; then
+  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${growth_rate})/")
 fi
 version=$(git ls-remote --refs $github_repo $branch | awk '{print substr($1,1,7)}')
 run_id="${run_id}-${version}"

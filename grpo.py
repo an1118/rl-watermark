@@ -4,7 +4,6 @@ import random
 import time
 from dataclasses import dataclass
 from tqdm import tqdm
-import json
 
 import numpy as np
 import torch
@@ -23,7 +22,7 @@ from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
-    regroup_list
+    regroup_list, exponential_schedule
 )
 from text_quality_score import _judge_text_quality
 
@@ -47,6 +46,8 @@ class Args:
     # GRPO training arguments
     num_iterations: int = 1
     """the number of iterations (computed in runtime)"""
+    max_step: int = 500
+    """the total number of steps to train the model"""
     batch_size: int = 16  # 16
     """the batch size"""
     num_minibatches: int = 2  # 2
@@ -80,8 +81,12 @@ class Args:
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
+    ori_score_strategy: str = "dynamic"
+    """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
+    growth_rate: float = 1.0
+    """the growth rate of the original text's detection score, used to calculate the reward"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
     detect_score_coefs_para: float = 1.0
@@ -190,6 +195,8 @@ class Actor(nn.Module):
         self.delta = 0.13  # watermark strength
         self.alpha = 1.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
+
+        self.global_step = 0
 
 
     def rollout(self, text, G):
@@ -423,6 +430,10 @@ class Actor(nn.Module):
         binary, 
         detect_score_coefs,
         attack_texts=None, 
+        ori_score_strategy='raw',
+        target_ori_score=None, 
+        max_step=None, 
+        growth_rate=None,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -430,6 +441,7 @@ class Actor(nn.Module):
         Args:
             batch (dictionary): All info included in this batch.
             attack_texts (dict): Optional; A dictionary containing different attack texts.
+            ori_score_strategy (str): Strategy to compute the original text's score. [raw, abs, dynamic, gap]
 
         Returns:
             dict: A dict of computed reward values for each watermarked_text.
@@ -527,13 +539,29 @@ class Actor(nn.Module):
                     detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
                 else:
                     # different ways to calculate original score
-                    if args.target_ori_score is not None:  # calculate the absolute difference of original score from 0.5 (target_ori_score)
-                        original_text_reward = abs(d_ori - args.target_ori_score)
+                    if ori_score_strategy == 'raw':
+                        d_ori_modified = d_ori
+                    elif ori_score_strategy == 'abs':
+                        assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'abs'."
+                        d_ori_modified = abs(d_ori - target_ori_score)
+                    elif ori_score_strategy == 'dynamic':
+                        if self.global_step != 0: import pdb; pdb.set_trace()  # check if max_step and growth_rate are provided
+                        assert all(x is not None for x in [target_ori_score, max_step, growth_rate]), "Missing required args for 'dynamic'."
+                        detect_score_coefs['ori'] = exponential_schedule(self.global_step, max_step, growth_rate)
+                        d_ori_modified = abs(d_ori - target_ori_score)
+                    elif ori_score_strategy == 'gap':
+                        assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'gap'."
+                        raise NotImplemented
+                        diff = abs(d_ori - target_ori_score)
+                        if 0.4 <= diff <= 0.6:
+                            d_ori_modified = d_ori
+                        else:
+                            raise NotImplemented  # TODO
                     else:
-                        original_text_reward = d_ori
+                        raise ValueError(f"Unknown ori_score_strategy: {ori_score_strategy}")
 
                     tmp1 = (
-                        - detect_score_coefs['ori'] * original_text_reward
+                        - detect_score_coefs['ori'] * d_ori_modified
                         + detect_score_coefs['wm'] * d_wm
                         + detect_score_coefs['para'] * d_para
                         - detect_score_coefs['senti'] * d_senti
@@ -589,7 +617,7 @@ if __name__ == "__main__":
     if not args.run_name:
         args.run_name = (
             f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
-            f"-ori{args.detect_score_coefs_ori}({args.target_ori_score})wm{args.detect_score_coefs_wm}"
+            f"-ori{args.detect_score_coefs_ori}({args.ori_score_strategy})wm{args.detect_score_coefs_wm}"
             f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
             f"hate{args.detect_score_coefs_hate}"
             f"-clip{args.clip_coef}-beta{args.beta}"
@@ -608,6 +636,10 @@ if __name__ == "__main__":
             args.run_name += "-gr_loss"
         if args.attack_model_name:
             args.run_name += f"-attack_{args.attack_model_name.split('/')[-1]}"
+        if args.ori_score_strategy == 'abs':
+            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.target_ori_score})")
+        elif args.ori_score_strategy == 'dynamic':
+            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.growth_rate})")
 
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
@@ -688,7 +720,15 @@ if __name__ == "__main__":
             # import pdb; pdb.set_trace()  # check all_watermarked_tuples shape
             
             ## compute rewards
-            result_dict = actor.compute_rewards(batch, args.binary, detect_score_coefs)
+            result_dict = actor.compute_rewards(
+                batch,
+                args.binary,
+                detect_score_coefs,
+                ori_score_strategy=args.ori_score_strategy,
+                target_ori_score=args.target_ori_score,
+                max_step=args.max_step,
+                growth_rate=args.growth_rate,
+            )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
             zero_rewards_group = torch.sum(torch.all(batch['rewards'] == 0, dim=1)).item()
@@ -790,7 +830,11 @@ if __name__ == "__main__":
                         },
                         args.binary,
                         detect_score_coefs,
-                        attack_texts=mb_attack_texts
+                        attack_texts=mb_attack_texts,
+                        ori_score_strategy=args.ori_score_strategy,
+                        target_ori_score=args.target_ori_score,
+                        max_step=args.max_step,
+                        growth_rate=args.growth_rate,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
@@ -905,6 +949,7 @@ if __name__ == "__main__":
                 optimizer.step()
 
                 global_step += 1
+                actor.global_step = global_step  # update global step in actor
                 print("Step", global_step, "loss:", loss.item())
 
                 ## Do evaluation if instructed to do so
@@ -960,3 +1005,7 @@ if __name__ == "__main__":
                     if overall_auc > best_auc:
                         best_auc = overall_auc
                         save_checkpoint(actor, args.checkpoint_dir, "best-overall_auc", best_mean_detect, global_step)
+
+                if global_step >= args.max_step:
+                    print(f"Reached max_step {args.max_step}. Stopping training.")
+                    exit(0)

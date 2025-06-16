@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import math
 import numpy as np
 import wandb
 from copy import deepcopy
@@ -223,3 +224,8 @@ def regroup_list(flat_list, batch, group):
     assert len(flat_list) == batch * group, "Input list length does not match B*G"
     return [flat_list[i * group:(i + 1) * group] for i in range(batch)]
 
+
+def exponential_schedule(step, max_step, growth_rate, min_val=1, max_val=100):
+    ratio = min(step / max_step, 1.0)
+    coeff = 1 - math.exp(-growth_rate * ratio)
+    return min_val + (max_val - min_val) * coeff
