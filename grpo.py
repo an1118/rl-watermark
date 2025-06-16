@@ -545,7 +545,6 @@ class Actor(nn.Module):
                         assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'abs'."
                         d_ori_modified = abs(d_ori - target_ori_score)
                     elif ori_score_strategy == 'dynamic':
-                        if self.global_step != 0: import pdb; pdb.set_trace()  # check if max_step and growth_rate are provided
                         assert all(x is not None for x in [target_ori_score, max_step, growth_rate]), "Missing required args for 'dynamic'."
                         detect_score_coefs['ori'] = exponential_schedule(self.global_step, max_step, growth_rate)
                         d_ori_modified = abs(d_ori - target_ori_score)

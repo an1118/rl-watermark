@@ -8,6 +8,7 @@
 #SBATCH --gpus=4
 #SBATCH --mem=128gb
 #SBATCH --time=5-00:00:00
+#SBATCH --exclude=c0903a-s25
 
 # module load cuda
 set -e
@@ -53,6 +54,7 @@ branch="sanity-detect_attack-v2"
 
 is_sanity_check=false 
 
+max_step=500
 batch_size=16  # 64
 num_minibatches=2
 G=8  # 8
@@ -114,13 +116,18 @@ cd $clone_dir
 cp /blue/buyuheng/li_an.ucsb/projects/rl-watermark/api.py $clone_dir/api.py
 
 CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
+  --max_step $max_step \
   --batch_size $batch_size \
   --num_minibatches $num_minibatches \
   --G $G \
   --clip_coef $clip_coef \
+  --beta $beta \
   --checkpoint_dir $repo/rl-watermark/ckpts/$run_id \
   --run_name $run_id \
   --detect_score_coefs_ori $detect_score_coefs_ori \
+  --ori_score_strategy $ori_score_strategy \
+  --target_ori_score $target_ori_score \
+  --growth_rate $growth_rate \
   --detect_score_coefs_wm $detect_score_coefs_wm \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \
