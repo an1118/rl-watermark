@@ -69,7 +69,8 @@ add_gr_loss=false
 detect_score_coefs_ori=1
 ori_score_strategy="dynamic"  # [raw, abs, dynamic, gap]
 target_ori_score=0.5
-growth_rate=1.0
+growth_rate=0.6
+sharpness=10
 detect_score_coefs_wm=1
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
@@ -105,6 +106,9 @@ fi
 if [ "$ori_score_strategy" = "dynamic" ]; then
   run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${growth_rate})/")
 fi
+if [ "$ori_score_strategy" = "gap" ]; then
+  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${sharpness})/")
+fi
 version=$(git ls-remote --refs $github_repo $branch | awk '{print substr($1,1,7)}')
 run_id="${run_id}-${version}"
 echo "Run ID: $run_id"
@@ -128,6 +132,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --ori_score_strategy $ori_score_strategy \
   --target_ori_score $target_ori_score \
   --growth_rate $growth_rate \
+  --sharpness $sharpness \
   --detect_score_coefs_wm $detect_score_coefs_wm \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \

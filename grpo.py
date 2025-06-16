@@ -22,7 +22,7 @@ from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
-    regroup_list, exponential_schedule
+    regroup_list, exponential_schedule, smooth_band_boost
 )
 from text_quality_score import _judge_text_quality
 
@@ -87,6 +87,8 @@ class Args:
     """the target detection score of the original text, used to calculate the reward"""
     growth_rate: float = 1.0
     """the growth rate of the original text's detection score, used to calculate the reward"""
+    sharpness: float = 10
+    """the sharpness of the original text's detection score, used to calculate the reward"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
     detect_score_coefs_para: float = 1.0
@@ -434,6 +436,7 @@ class Actor(nn.Module):
         target_ori_score=None, 
         max_step=None, 
         growth_rate=None,
+        sharpness=None,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -550,12 +553,8 @@ class Actor(nn.Module):
                         d_ori_modified = abs(d_ori - target_ori_score)
                     elif ori_score_strategy == 'gap':
                         assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'gap'."
-                        raise NotImplemented
-                        diff = abs(d_ori - target_ori_score)
-                        if 0.4 <= diff <= 0.6:
-                            d_ori_modified = d_ori
-                        else:
-                            raise NotImplemented  # TODO
+                        detect_score_coefs['ori'] = smooth_band_boost(d_ori, center=target_ori_score, sharpness=sharpness)
+                        d_ori_modified = abs(d_ori - target_ori_score)
                     else:
                         raise ValueError(f"Unknown ori_score_strategy: {ori_score_strategy}")
 
@@ -639,6 +638,8 @@ if __name__ == "__main__":
             args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.target_ori_score})")
         elif args.ori_score_strategy == 'dynamic':
             args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.growth_rate})")
+        elif args.ori_score_strategy == 'gap':
+            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.sharpness})")
 
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
@@ -727,6 +728,7 @@ if __name__ == "__main__":
                 target_ori_score=args.target_ori_score,
                 max_step=args.max_step,
                 growth_rate=args.growth_rate,
+                sharpness=args.sharpness,
             )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
@@ -834,6 +836,7 @@ if __name__ == "__main__":
                         target_ori_score=args.target_ori_score,
                         max_step=args.max_step,
                         growth_rate=args.growth_rate,
+                        sharpness=args.sharpness,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
