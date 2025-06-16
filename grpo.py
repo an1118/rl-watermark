@@ -115,7 +115,7 @@ class Args:
     """the name of the run logged to wandb"""
     do_eval: bool = False
     """if toggled, the model will be evaluated every `eval_steps` steps"""
-    eval_steps: int = 2
+    eval_steps: int = 10
     """the number of steps between evaluations"""
 
     # Sanity check arguments
@@ -169,12 +169,13 @@ class Actor(nn.Module):
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
         self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
-        self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu1)
+        self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
         for param in self.embed_map_model.parameters():
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
         self.watermark_tokenizer.pad_token = self.watermark_tokenizer.eos_token
         self.watermark_model = AutoModelForCausalLM.from_pretrained(watermark_model_name).to(self.gpu1)
+        # import pdb; pdb.set_trace()  # TODO: use bf16
         for param in self.watermark_model.parameters():
             param.requires_grad = False  # freeze the watermark model
 
@@ -226,7 +227,7 @@ class Actor(nn.Module):
             logprobs = torch.tensor([lp[id].logprob for lp, id in zip(o.logprobs, text_ids)])
             watermarked_tuples.append((output_text, text_ids, logprobs)) 
 
-        # import pdb; pdb.set_trace()  # check generated results
+        # import pdb; pdb.set_trace()  # check generated results. device: cpu
         return watermarked_tuples
 
     def get_per_token_logps(self, embed_model, original_text, watermarked_texts_ids):
@@ -263,7 +264,7 @@ class Actor(nn.Module):
             per_token_logps = self._get_per_token_logps(self.watermark_model, green_red_split, input_ids, attention_mask, logits_to_keep)
             per_token_logps = per_token_logps.squeeze(0)
             all_logprobs.append(per_token_logps)
-        
+            del watermarked, watermarked_attention_mask, input_ids, attention_mask, per_token_logps
         return all_logprobs
 
     def _get_per_token_logps(self, model, green_red_split, input_ids, attention_mask, logits_to_keep):
@@ -340,24 +341,25 @@ class Actor(nn.Module):
             return_tensors='pt',
             add_special_tokens=False,
             padding=True,
-        ).to(self.watermark_model.device)
+        )
         # tokenization_time = time.time() - start_time
         # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
 
-        scores = []  # [B]
-        mini_batch_size = 32  # You can adjust this value as needed
+        mini_batch_size = 64
+
+        all_entropy = []
         for start in range(0, len(texts), mini_batch_size):
             end = min(start + mini_batch_size, len(texts))
-            batch_inputs = {k: v[start:end] for k, v in inputs.items()}
-            batch_green_red_splits = green_red_splits[start:end]
+            batch_inputs = {k: v[start:end].to(self.watermark_model.device) for k, v in inputs.items()}
 
             # start_time = time.time()
             # Compute logits for the whole mini batch
-            logits = self.watermark_model(
-                batch_inputs['input_ids'],
-                attention_mask=batch_inputs['attention_mask'],
-                logits_to_keep=batch_inputs['input_ids'].size(1)
-            ).logits
+            with torch.no_grad():
+                logits = self.watermark_model(
+                    batch_inputs['input_ids'],
+                    attention_mask=batch_inputs['attention_mask'],
+                    logits_to_keep=batch_inputs['input_ids'].size(1)
+                ).logits
             logits = logits[:, :-1, :]  # (miniB, L-1, V)
             # logits_time = time.time() - start_time
             # print(f"Logits computation time: {logits_time:.4f} seconds", flush=True)
@@ -367,9 +369,21 @@ class Actor(nn.Module):
             entropy = self._next_token_entropy(logits)  # [miniB, L-1]
             # entropy_time = time.time() - start_time
             # print(f"Entropy computation time: {entropy_time:.4f} seconds", flush=True)
+            all_entropy.append(entropy.cpu())
+
+            del logits, entropy, batch_inputs  # free memory
+        # print(f"===========", flush=True)
+        all_entropy = torch.cat(all_entropy, dim=0).to(self.watermark_model.device)  # [B, L-1]
+
+        scores = []  # [B]
+        for start in range(0, len(texts), mini_batch_size):
+            end = min(start + mini_batch_size, len(texts))
+            batch_inputs = {k: v[start:end].to(self.watermark_model.device) for k, v in inputs.items()}
+            batch_green_red_splits = green_red_splits[start:end]
+            batch_entropy = all_entropy[start:start + mini_batch_size]  # [miniB, L-1]
 
             # start_time = time.time()
-            entropy_mask = (entropy > self.alpha).long()
+            entropy_mask = (batch_entropy > self.alpha).long()
             # Add a column of ones at the beginning of entropy_mask
             ones_col = torch.ones(entropy_mask.size(0), 1, dtype=entropy_mask.dtype, device=entropy_mask.device)
             entropy_mask = torch.cat([ones_col, entropy_mask], dim=1)
@@ -394,9 +408,10 @@ class Actor(nn.Module):
             scores.append(scores_)
             # score_time = time.time() - start_time
             # print(f"Score computation time: {score_time:.4f} seconds", flush=True)
-            # print("==========================", flush=True)
-            del logits, batch_inputs  # free memory
+            del batch_inputs, batch_green_red_splits, batch_entropy  # free memory
 
+        # print(f"===========", flush=True)
+        del all_entropy, inputs, green_red_splits  # free memory
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
         # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
@@ -507,7 +522,7 @@ class Actor(nn.Module):
                     )
                         # detect_score_coefs['latter'] * r_senti_latter +
                     # import pdb; pdb.set_trace()  # check if reward values calculated correctly
-                    rewards.append(torch.tensor(reward))
+                    rewards.append(reward)
                     tmp = r_wm + r_para + r_senti + r_hate
                     detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
                 else:
@@ -575,10 +590,12 @@ if __name__ == "__main__":
         args.run_name = (
             f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
             f"-ori{args.detect_score_coefs_ori}({args.target_ori_score})wm{args.detect_score_coefs_wm}"
-            f"-clip{args.clip_coef}-beta{args.beta}"
             f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
             f"hate{args.detect_score_coefs_hate}"
+            f"-clip{args.clip_coef}-beta{args.beta}"
         )
+        if args.is_sanity_check:
+            args.run_name = f"sanity_check-{args.run_name}"
         if args.binary:
             args.run_name += "-binary"
         if args.use_soft_split:
@@ -642,7 +659,7 @@ if __name__ == "__main__":
     if args.is_sanity_check:
         # use only one batch for sanity check
         print("================= Sanity Check Mode =================", flush=True)
-        train_set = train_set[args.batch_size]
+        train_set = train_set[:args.batch_size]
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -666,7 +683,7 @@ if __name__ == "__main__":
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
                 with torch.no_grad():
-                    watermarked_tuples = actor.rollout(original_data, args.G)
+                    watermarked_tuples = actor.rollout(original_data, args.G)  # device: cpu
                 batch['watermarked_tuples'].append(watermarked_tuples)
             # import pdb; pdb.set_trace()  # check all_watermarked_tuples shape
             
@@ -720,6 +737,7 @@ if __name__ == "__main__":
             std = batch['rewards'].std(dim=1, keepdim=True) + 1e-8
             batch['advantages'] = (batch['rewards'] - mean) / std
             # import pdb; pdb.set_trace()  # check if advantages are calculated on correct dimensions
+            del batch['rewards']  # free memory
 
             ## Optimizing the policy and value network
             b_inds = np.arange(args.batch_size)
@@ -750,7 +768,7 @@ if __name__ == "__main__":
                 all_per_token_kl = []  # [mb_size, G, seq_len_i]
                 for original_text, watermarked_tuples in zip(mb_original_text, mb_watermarked_tuples):
                     new_logprobs = actor.get_per_token_logps(actor.embed_map_model, original_text, [t[1] for t in watermarked_tuples])  # [G, seq_len_i]
-                    # import pdb; pdb.set_trace()  # check if new_logprobs has gradient
+                    # import pdb; pdb.set_trace()  # check if new_logprobs has gradient, device: gpu1(tf wm model)
                     new_mb_logprobs.append(new_logprobs)
                     if args.beta != 0.0:
                         with torch.no_grad():
@@ -758,6 +776,7 @@ if __name__ == "__main__":
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
                             all_per_token_kl.append(per_token_kl)
+                            del ref_logprobs  # free memory
                 on_policy_logprob_time = time.time() - start_time
                 print(f"On policy logprob calculation time: {on_policy_logprob_time:.4f} seconds")
                 
@@ -775,6 +794,7 @@ if __name__ == "__main__":
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
+                    del result_dict  # free memory
 
                 if args.add_gr_loss:
                     # calculate gr splits
@@ -811,6 +831,7 @@ if __name__ == "__main__":
                             # assert len(new_logprobs) == len(old_logprobs)
                             # import pdb; pdb.set_trace()  # first mini batch: check if new_logprobs and old_logprobs are the same
                             ratio = torch.exp(new_logprobs - old_logprobs)
+                            del old_logprobs  # free memory
                         except Exception as e:
                             print(e)
                             print(j, i)
@@ -822,6 +843,7 @@ if __name__ == "__main__":
                             pg_loss = torch.max(pg_loss, pg_loss_clipped)
                         # import pdb; pdb.set_trace()  # check if pg_loss is calculated correctly
                         total_loss_pg += pg_loss.sum()
+                        del pg_loss  # free memory
                         if args.beta != 0.0:
                             kl = args.beta * all_per_token_kl[j][i].sum()
                             total_kl += kl
@@ -835,6 +857,7 @@ if __name__ == "__main__":
                                 rg_loss = torch.max(rg_loss, rg_loss_clipped)
                             # import pdb; pdb.set_trace()  # check if rg_loss is calculated correctly
                             total_loss_rg += rg_loss.sum()
+                            del rg_loss  # free memory
                         total_output_len += len(new_logprobs)
                 
                 ### log gradient norm of two losses
@@ -861,13 +884,20 @@ if __name__ == "__main__":
                 if args.beta != 0.0:
                     loss += total_kl
                     wandb.log({"train/kl": total_kl.item()/total_output_len}, step=global_step)
+                    del total_kl  # free memory
                 if args.add_reward_gradient:
                     loss += total_loss_rg
+                    del total_loss_rg  # free memory
                 if args.add_gr_loss:
                     loss += loss_gr.to(loss.device)
                     wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
+                    del loss_gr  # free memory
                 loss /= total_output_len  # average over the total output length
+                # import pdb; pdb.set_trace()  # check device. loss: ; total_loss_pg: ; total_kl: ; total_loss_rg: ; all at tf wm model's gpu
                 wandb.log({"train/loss": loss.item()}, step=global_step)
+
+                ### free memory
+                del mb_original_text, mb_watermarked_tuples, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -875,7 +905,7 @@ if __name__ == "__main__":
                 optimizer.step()
 
                 global_step += 1
-                print("Step", global_step, "loss:", loss.item(), "kl:", total_kl.item() / total_output_len)
+                print("Step", global_step, "loss:", loss.item())
 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:

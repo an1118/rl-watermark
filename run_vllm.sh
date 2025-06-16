@@ -3,10 +3,10 @@
 #SBATCH --output=outputs/%j.out
 #SBATCH --error=outputs/%j.err
 #SBATCH --nodes=1
-#SBATCH --partition=gpu
+#SBATCH --partition=hpg-b200
 ##SBATCH --reservation=buyuheng 
-#SBATCH --gpus=a100:4
-#SBATCH --mem=64gb
+#SBATCH --gpus=4
+#SBATCH --mem=128gb
 #SBATCH --time=5-00:00:00
 
 # module load cuda
@@ -19,7 +19,7 @@ CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
   --model "Qwen/Qwen3-14B" \
   --tensor-parallel-size 1 \
   --dtype bfloat16 \
-  --max-model-len 1500 \
+  --max-model-len 2000 \
   --max-num-seqs 128 \
   --port 8000  > "$vllm_log_file" 2>&1 &
 VLLM_PID=$!
@@ -73,7 +73,7 @@ detect_score_coefs_senti=1
 detect_score_coefs_hate=1
 
 do_eval=true
-eval_steps=20  # 20
+eval_steps=10  # 20
 eval_batch_size=100  # 100
 
 
