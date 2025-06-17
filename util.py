@@ -237,5 +237,4 @@ def smooth_band_boost(score, center=0.5, width=0.1, sharpness=10, min_coeff=0.0,
     # Push values toward 0 if near center, toward 1 if far from center
     dist_from_center = abs(score - center)
     coeff = 1 / (1 + math.exp(-sharpness * (dist_from_center - width)))
-    print('coeff:', coeff)
     return min_coeff + (max_coeff - min_coeff) * coeff
