@@ -740,6 +740,7 @@ if __name__ == "__main__":
                         "senti": 1.0,
                         "hate": 1.0,
                     }
+                print(f"[Curriculum] Training {detect_score_coefs} at step {global_step}")
 
             batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
 
