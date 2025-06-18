@@ -79,9 +79,13 @@ class Args:
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
+    curriculum: str = "v1"
+    """the curriculum strategy to use, can be one of [v1]"""
+    curriculum_steps: int = 6
+    """the number of steps to increase the difficulty of the curriculum"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
-    ori_score_strategy: str = "dynamic"
+    ori_score_strategy: str = "abs"
     """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
@@ -138,6 +142,11 @@ class Args:
             raise ValueError("use_median_split and add_gr_loss cannot both be True.")
         if self.attack_model_name is not None and self.attack_model_url is None:
             raise ValueError("If `attack_model_name` is specified, `attack_model_url` must also be provided.")
+        if self.curriculum_steps and self.curriculum_steps % self.num_minibatches != 0:
+            raise ValueError("curriculum_steps must be a multiple of num_minibatches.")
+        if self.curriculum == 'v1':
+            self.ori_score_strategy = 'abs'  # use abs strategy for curriculum v1
+            self.target_ori_score = 0.5  # set target original score for curriculum v1
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -613,13 +622,17 @@ if __name__ == "__main__":
     }
 
     if not args.run_name:
-        args.run_name = (
-            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
-            f"-ori{args.detect_score_coefs_ori}({args.ori_score_strategy})wm{args.detect_score_coefs_wm}"
-            f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
-            f"hate{args.detect_score_coefs_hate}"
-            f"-clip{args.clip_coef}-beta{args.beta}"
-        )
+        args.run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
+
+        if not args.curriculum:
+            args.run_name += (
+                f"-ori{args.detect_score_coefs_ori}({args.ori_score_strategy})wm{args.detect_score_coefs_wm}"
+                f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
+                f"hate{args.detect_score_coefs_hate}"
+            )
+        else:
+            args.run_name += f"-ct_{args.curriculum}_step{args.curriculum_steps}"
+
         if args.is_sanity_check:
             args.run_name = f"sanity_check-{args.run_name}"
         if args.binary:
@@ -706,6 +719,28 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
+            # prepare curriculum
+            if args.curriculum == 'v1':
+                # Curriculum logic: 
+                # if (global_step // args.curriculum_steps) is even, then train {ori, wm, para}
+                # elif it's odd, then train {senti, hate}
+                if (global_step // args.curriculum_steps) % 2 == 0:
+                    detect_score_coefs = {
+                        "ori": 1.0,
+                        "wm": 1.0,
+                        "para": 1.0,
+                        "senti": 0.0,
+                        "hate": 0.0,
+                    }
+                else:
+                    detect_score_coefs = {
+                        "ori": 0.0,
+                        "wm": 0.0,
+                        "para": 0.0,
+                        "senti": 1.0,
+                        "hate": 1.0,
+                    }
+
             batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
 
             # rollout before optimization
