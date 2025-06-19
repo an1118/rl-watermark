@@ -631,7 +631,7 @@ if __name__ == "__main__":
                 f"hate{args.detect_score_coefs_hate}"
             )
         else:
-            args.run_name += f"-ct_{args.curriculum}_step{args.curriculum_steps}"
+            args.run_name += f"-ct_{args.curriculum}_step{args.curriculum_steps}_ori({args.ori_score_strategy})"
 
         if args.is_sanity_check:
             args.run_name = f"sanity_check-{args.run_name}"

@@ -54,6 +54,7 @@ github_repo="https://github.com/an1118/rl-watermark.git"
 branch="sanity-detect_attack-v2"
 
 is_sanity_check=false 
+seed=666
 
 max_step=500
 batch_size=16  # 64
@@ -66,19 +67,19 @@ binary=false  # if true, how to add second gradient
 use_soft_split=false
 use_median_split=false
 add_reward_gradient=true
-add_gr_loss=true
-curriculum="v1"
+add_gr_loss=false
+curriculum="none"
 curriculum_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="abs"  # [raw, abs, dynamic, gap]
+ori_score_strategy="dynamic"  # [raw, abs, dynamic, gap]
 target_ori_score=0.5
-growth_rate=0.6
-sharpness=10
+growth_rate=0.8
+sharpness=5
 detect_score_coefs_wm=1
-detect_score_coefs_para=1
-detect_score_coefs_senti=1
+detect_score_coefs_para=0
+detect_score_coefs_senti=0
 # detect_score_coefs_latter=1
-detect_score_coefs_hate=1
+detect_score_coefs_hate=0
 
 do_eval=true
 eval_steps=20  # 20
@@ -89,7 +90,7 @@ run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta"
 if [ -n "$curriculum" ] && [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}para${detect_score_coefs_para}senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
-  run_id="${run_id}-ct_${curriculum}_step${curriculum_steps}"
+  run_id="${run_id}-ct_${curriculum}_step${curriculum_steps}_ori(${args.ori_score_strategy})"
 fi
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"
@@ -119,7 +120,7 @@ if [ "$ori_score_strategy" = "gap" ]; then
   run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${sharpness})/")
 fi
 version=$(git ls-remote --refs $github_repo $branch | awk '{print substr($1,1,7)}')
-run_id="${run_id}-${version}"
+run_id="${run_id}-${version}-seed${seed}"
 echo "Run ID: $run_id"
 clone_dir="$repo/scratch/$run_id"
 rm -rf $clone_dir
