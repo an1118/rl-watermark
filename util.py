@@ -238,3 +238,52 @@ def smooth_band_boost(score, center=0.5, width=0.1, sharpness=10, min_coeff=0.0,
     dist_from_center = abs(score - center)
     coeff = 1 / (1 + math.exp(-sharpness * (dist_from_center - width)))
     return min_coeff + (max_coeff - min_coeff) * coeff
+
+
+def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_detect_score_coefs):
+    if curriculum == 'v1':
+        # Curriculum logic: 
+        # if (step // curriculum_steps) is even, then train {ori, wm, para}
+        # elif it's odd, then train {senti, hate}
+        if (step // curriculum_steps) % 2 == 0:
+            detect_score_coefs = {
+                "ori": 1.0,
+                "wm": 1.0,
+                "para": 1.0,
+                "senti": 0.0,
+                "hate": 0.0,
+            }
+        else:
+            detect_score_coefs = {
+                "ori": 0.0,
+                "wm": 0.0,
+                "para": 0.0,
+                "senti": 1.0,
+                "hate": 1.0,
+            }
+    elif curriculum == 'v2':
+        # Curriculum logic: 
+        # if (step // curriculum_steps) is even, then train {ori, wm, para}
+        # elif it's odd, then train {ori, senti, hate}
+        if (step // curriculum_steps) % 2 == 0:
+            detect_score_coefs = {
+                "ori": 1.0,
+                "wm": 1.0,
+                "para": 1.0,
+                "senti": 0.0,
+                "hate": 0.0,
+            }
+        else:
+            detect_score_coefs = {
+                "ori": 1.0,
+                "wm": 0.0,
+                "para": 0.0,
+                "senti": 1.0,
+                "hate": 1.0,
+            }
+    else:
+        detect_score_coefs = original_detect_score_coefs
+        print(f"[Curriculum] Not using curriculum learning.")
+
+    print(f"[Curriculum] Training {detect_score_coefs} at step {step}", flush=True)
+    return detect_score_coefs

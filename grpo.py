@@ -22,7 +22,8 @@ from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
-    regroup_list, exponential_schedule, smooth_band_boost
+    regroup_list, exponential_schedule, smooth_band_boost,
+    curriculum_learning_schedule
 )
 from text_quality_score import _judge_text_quality
 
@@ -721,27 +722,7 @@ if __name__ == "__main__":
 
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
             # prepare curriculum
-            if args.curriculum == 'v1':
-                # Curriculum logic: 
-                # if (global_step // args.curriculum_steps) is even, then train {ori, wm, para}
-                # elif it's odd, then train {senti, hate}
-                if (global_step // args.curriculum_steps) % 2 == 0:
-                    detect_score_coefs = {
-                        "ori": 1.0,
-                        "wm": 1.0,
-                        "para": 1.0,
-                        "senti": 0.0,
-                        "hate": 0.0,
-                    }
-                else:
-                    detect_score_coefs = {
-                        "ori": 0.0,
-                        "wm": 0.0,
-                        "para": 0.0,
-                        "senti": 1.0,
-                        "hate": 1.0,
-                    }
-                print(f"[Curriculum] Training {detect_score_coefs} at step {global_step}")
+            detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.curriculum_steps, detect_score_coefs)
 
             batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
 
