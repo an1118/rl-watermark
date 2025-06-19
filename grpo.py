@@ -653,6 +653,7 @@ if __name__ == "__main__":
             args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.growth_rate})")
         elif args.ori_score_strategy == 'gap':
             args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.sharpness})")
+        args.run_name += f"-seed{args.seed}"
 
     # make checkpoint dir and init best reward
     if not args.checkpoint_dir:
