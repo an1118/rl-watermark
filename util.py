@@ -287,3 +287,22 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
 
     print(f"[Curriculum] Training {detect_score_coefs} at step {step}", flush=True)
     return detect_score_coefs
+
+
+def coef_strategy(strategy, score, coef, target_score, step, max_step, growth_rate):
+    if strategy == 'raw':
+        pass
+    elif strategy == 'abs':
+        score = abs(score - target_score)
+    elif strategy == 'dynamic':
+        assert all(x is not None for x in [target_score, max_step, growth_rate]), "Missing required args for 'dynamic'."
+        coef = exponential_schedule(step, max_step, growth_rate)
+        score = abs(score - target_score)
+    elif strategy == 'gap':
+        assert target_score is not None, "Missing target_score for 'gap'."
+        coef = smooth_band_boost(score, center=target_score, sharpness=growth_rate)
+        score = abs(score - target_score)
+    else:
+        raise ValueError(f"Unknown score strategy: {strategy}")
+    return score, coef
+

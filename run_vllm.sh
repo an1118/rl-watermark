@@ -71,12 +71,15 @@ add_gr_loss=false
 curriculum="v1"
 curriculum_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="gap"  # [raw, abs, dynamic, gap]
+ori_score_strategy="dynamic"  # [raw, abs, dynamic, gap]
 target_ori_score=0.5
-growth_rate=0.8
-sharpness=5
+ori_growth_rate=0.8
 detect_score_coefs_wm=1
+wm_score_strategy="dynamic"
+wm_growth_rate=0.4
 detect_score_coefs_para=1
+para_score_strategy="dynamic"
+para_growth_rate=0.4
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
@@ -87,10 +90,10 @@ eval_batch_size=100  # 100
 
 
 run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta"
-if [ -n "$curriculum" ] && [ "${curriculum,,}" = "none" ]; then
-  run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}para${detect_score_coefs_para}senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
+if [ "${curriculum,,}" = "none" ]; then
+  run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
-  run_id="${run_id}-ct_${curriculum}_step${curriculum_steps}_ori(${ori_score_strategy})"
+  run_id="${run_id}-ct_${curriculum}_step${curriculum_steps}_ori(${ori_score_strategy})wm(${wm_score_strategy})para(${para_score_strategy})"
 fi
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"
@@ -111,13 +114,16 @@ if [ "$add_gr_loss" = true ]; then
     run_id="${run_id}-gr_loss"
 fi
 if [ "$ori_score_strategy" = "abs" ]; then
-  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${target_ori_score})/")
+  run_id=$(echo "$run_id" | sed "s/ori(${ori_score_strategy})/ori(${ori_score_strategy}-${target_ori_score})/")
 fi
-if [ "$ori_score_strategy" = "dynamic" ]; then
-  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${growth_rate})/")
+if [ "$ori_score_strategy" = "dynamic" ] || [ "$ori_score_strategy" = "gap" ]; then
+  run_id=$(echo "$run_id" | sed "s/ori(${ori_score_strategy})/ori(${ori_score_strategy}-${ori_growth_rate})/")
 fi
-if [ "$ori_score_strategy" = "gap" ]; then
-  run_id=$(echo "$run_id" | sed "s/(${ori_score_strategy})/(${ori_score_strategy}-${sharpness})/")
+if [ "$wm_score_strategy" = "dynamic" ]; then
+  run_id=$(echo "$run_id" | sed "s/wm(${wm_score_strategy})/wm(${wm_score_strategy}-${wm_growth_rate})/")
+fi
+if [ "$para_score_strategy" = "dynamic" ]; then
+  run_id=$(echo "$run_id" | sed "s/para(${para_score_strategy})/para(${para_score_strategy}-${para_growth_rate})/")
 fi
 version=$(git ls-remote --refs $github_repo $branch | awk '{print substr($1,1,7)}')
 run_id="${run_id}-${version}-seed${seed}"
@@ -143,10 +149,13 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --detect_score_coefs_ori $detect_score_coefs_ori \
   --ori_score_strategy $ori_score_strategy \
   --target_ori_score $target_ori_score \
-  --growth_rate $growth_rate \
-  --sharpness $sharpness \
+  --ori_growth_rate $ori_growth_rate \
   --detect_score_coefs_wm $detect_score_coefs_wm \
+  --wm_score_strategy $wm_score_strategy \
+  --wm_growth_rate $wm_growth_rate \
   --detect_score_coefs_para $detect_score_coefs_para \
+  --para_score_strategy $para_score_strategy \
+  --para_growth_rate $para_growth_rate \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \
   --eval_steps $eval_steps \

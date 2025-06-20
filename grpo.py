@@ -23,7 +23,7 @@ from util import (
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
     regroup_list, exponential_schedule, smooth_band_boost,
-    curriculum_learning_schedule
+    curriculum_learning_schedule, coef_strategy
 )
 from text_quality_score import _judge_text_quality
 
@@ -80,24 +80,30 @@ class Args:
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
-    curriculum: str = "v1"
+    curriculum: str = "none"
     """the curriculum strategy to use, can be one of [v1]"""
     curriculum_steps: int = 6
     """the number of steps to increase the difficulty of the curriculum"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
-    ori_score_strategy: str = "abs"
+    ori_score_strategy: str = "dynamic"
     """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
-    growth_rate: float = 1.0
+    ori_growth_rate: float = 1.0
     """the growth rate of the original text's detection score, used to calculate the reward"""
-    sharpness: float = 10
-    """the sharpness of the original text's detection score, used to calculate the reward"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
+    wm_score_strategy: str = "dynamic"
+    """the strategy to compute the watermarked text's score, can be one of [raw, abs, dynamic, gap]"""
+    wm_growth_rate: float = 1.0
+    """the growth rate of the watermarked text's detection score, used to calculate the reward"""
     detect_score_coefs_para: float = 1.0
     """the coefficient of the paraphrased text's detection score in the reward calculation"""
+    para_score_strategy: str = "dynamic"
+    """the strategy to compute the paraphrased text's score, can be one of [raw, abs, dynamic, gap]"""
+    para_growth_rate: float = 1.0
+    """the growth rate of the paraphrased text's detection score, used to calculate the reward"""
     detect_score_coefs_senti: float = 1.0
     """the coefficient of the sentiment attacked text's detection score in the reward calculation"""
     # detect_score_coefs_latter: float = 1.0
@@ -145,9 +151,6 @@ class Args:
             raise ValueError("If `attack_model_name` is specified, `attack_model_url` must also be provided.")
         if self.curriculum_steps and self.curriculum_steps % self.num_minibatches != 0:
             raise ValueError("curriculum_steps must be a multiple of num_minibatches.")
-        if self.curriculum == 'v1':
-            self.ori_score_strategy = 'abs'  # use abs strategy for curriculum v1
-            self.target_ori_score = 0.5  # set target original score for curriculum v1
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -445,8 +448,11 @@ class Actor(nn.Module):
         ori_score_strategy='raw',
         target_ori_score=None, 
         max_step=None, 
-        growth_rate=None,
-        sharpness=None,
+        ori_growth_rate=None,
+        wm_score_strategy='raw',
+        wm_growth_rate=None,
+        para_score_strategy='raw',
+        para_growth_rate=None,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -455,6 +461,8 @@ class Actor(nn.Module):
             batch (dictionary): All info included in this batch.
             attack_texts (dict): Optional; A dictionary containing different attack texts.
             ori_score_strategy (str): Strategy to compute the original text's score. [raw, abs, dynamic, gap]
+            wm_score_strategy (str): Strategy to compute the watermarked text's score. [raw, abs, dynamic, gap]
+            para_score_strategy (str): Strategy to compute the paraphrased text's score. [raw, abs, dynamic, gap]
 
         Returns:
             dict: A dict of computed reward values for each watermarked_text.
@@ -551,22 +559,13 @@ class Actor(nn.Module):
                     tmp = r_wm + r_para + r_senti + r_hate
                     detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
                 else:
-                    # different ways to calculate original score
-                    if ori_score_strategy == 'raw':
-                        d_ori_modified = d_ori
-                    elif ori_score_strategy == 'abs':
-                        assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'abs'."
-                        d_ori_modified = abs(d_ori - target_ori_score)
-                    elif ori_score_strategy == 'dynamic':
-                        assert all(x is not None for x in [target_ori_score, max_step, growth_rate]), "Missing required args for 'dynamic'."
-                        detect_score_coefs['ori'] = exponential_schedule(self.global_step, max_step, growth_rate)
-                        d_ori_modified = abs(d_ori - target_ori_score)
-                    elif ori_score_strategy == 'gap':
-                        assert target_ori_score is not None, "target_ori_score must be provided if ori_score_strategy is 'gap'."
-                        detect_score_coefs['ori'] = smooth_band_boost(d_ori, center=target_ori_score, sharpness=sharpness)
-                        d_ori_modified = abs(d_ori - target_ori_score)
-                    else:
-                        raise ValueError(f"Unknown ori_score_strategy: {ori_score_strategy}")
+                    # different ways to calculate score and coefficient
+                    d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
+                        ori_score_strategy, d_ori, detect_score_coefs['ori'], target_ori_score, self.global_step, max_step, ori_growth_rate)
+                    _, detect_score_coefs['wm'] = coef_strategy(
+                        wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, max_step, wm_growth_rate)
+                    _, detect_score_coefs['para'] = coef_strategy(
+                        para_score_strategy, d_para, detect_score_coefs['para'], 0, self.global_step, max_step, para_growth_rate)
 
                     tmp1 = (
                         - detect_score_coefs['ori'] * d_ori_modified
@@ -622,17 +621,26 @@ if __name__ == "__main__":
         "hate": args.detect_score_coefs_hate,
     }
 
+    if args.curriculum.lower() == "none":
+        args.curriculum = None
+
     if not args.run_name:
         args.run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
 
         if not args.curriculum:
             args.run_name += (
-                f"-ori{args.detect_score_coefs_ori}({args.ori_score_strategy})wm{args.detect_score_coefs_wm}"
-                f"para{args.detect_score_coefs_para}senti{args.detect_score_coefs_senti}"
-                f"hate{args.detect_score_coefs_hate}"
+                f"-ori{args.detect_score_coefs_ori}({args.ori_score_strategy})"
+                f"wm{args.detect_score_coefs_wm}({args.wm_score_strategy})"
+                f"para{args.detect_score_coefs_para}({args.para_score_strategy})"
+                f"senti{args.detect_score_coefs_senti}hate{args.detect_score_coefs_hate}"
             )
         else:
-            args.run_name += f"-ct_{args.curriculum}_step{args.curriculum_steps}_ori({args.ori_score_strategy})"
+            args.run_name += (
+                f"-ct_{args.curriculum}_step{args.curriculum_steps}"
+                f"_ori({args.ori_score_strategy})"
+                f"wm({args.wm_score_strategy})"
+                f"para({args.para_score_strategy})"
+            )
 
         if args.is_sanity_check:
             args.run_name = f"sanity_check-{args.run_name}"
@@ -649,11 +657,13 @@ if __name__ == "__main__":
         if args.attack_model_name:
             args.run_name += f"-attack_{args.attack_model_name.split('/')[-1]}"
         if args.ori_score_strategy == 'abs':
-            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.target_ori_score})")
-        elif args.ori_score_strategy == 'dynamic':
-            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.growth_rate})")
-        elif args.ori_score_strategy == 'gap':
-            args.run_name = args.run_name.replace(f"({args.ori_score_strategy})", f"({args.ori_score_strategy}-{args.sharpness})")
+            args.run_name = args.run_name.replace(f"ori({args.ori_score_strategy})", f"ori({args.ori_score_strategy}-{args.target_ori_score})")
+        elif args.ori_score_strategy in ['dynamic', 'gap']:
+            args.run_name = args.run_name.replace(f"ori({args.ori_score_strategy})", f"ori({args.ori_score_strategy}-{args.ori_growth_rate})")
+        if args.wm_score_strategy in ['dynamic']:
+            args.run_name = args.run_name.replace(f"wm({args.wm_score_strategy})", f"wm({args.wm_score_strategy}-{args.wm_growth_rate})")
+        if args.para_score_strategy in ['dynamic']:
+            args.run_name = args.run_name.replace(f"para({args.para_score_strategy})", f"para({args.para_score_strategy}-{args.para_growth_rate})")
         args.run_name += f"-seed{args.seed}"
 
     # make checkpoint dir and init best reward
@@ -745,8 +755,11 @@ if __name__ == "__main__":
                 ori_score_strategy=args.ori_score_strategy,
                 target_ori_score=args.target_ori_score,
                 max_step=args.max_step,
-                growth_rate=args.growth_rate,
-                sharpness=args.sharpness,
+                ori_growth_rate=args.ori_growth_rate,
+                wm_score_strategy=args.wm_score_strategy,
+                wm_growth_rate=args.wm_growth_rate,
+                para_score_strategy=args.para_score_strategy,
+                para_growth_rate=args.para_growth_rate,
             )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
@@ -853,8 +866,11 @@ if __name__ == "__main__":
                         ori_score_strategy=args.ori_score_strategy,
                         target_ori_score=args.target_ori_score,
                         max_step=args.max_step,
-                        growth_rate=args.growth_rate,
-                        sharpness=args.sharpness,
+                        ori_growth_rate=args.ori_growth_rate,
+                        wm_score_strategy=args.wm_score_strategy,
+                        wm_growth_rate=args.wm_growth_rate,
+                        para_score_strategy=args.para_score_strategy,
+                        para_growth_rate=args.para_growth_rate,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
