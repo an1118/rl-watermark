@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
+from Collection import defaultdict
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -194,7 +195,7 @@ class Actor(nn.Module):
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
         self.watermark_tokenizer.pad_token = self.watermark_tokenizer.eos_token
-        self.watermark_model = AutoModelForCausalLM.from_pretrained(watermark_model_name).to(self.gpu1)
+        self.watermark_model = AutoModelForCausalLM.from_pretrained(watermark_model_name, torch_dtype=torch.bfloat16).to(self.gpu1)
         # import pdb; pdb.set_trace()  # TODO: use bf16
         for param in self.watermark_model.parameters():
             param.requires_grad = False  # freeze the watermark model
@@ -215,9 +216,36 @@ class Actor(nn.Module):
 
 
     def rollout(self, text, G):
-        # get G/R split
-        green_red_split = self._get_green_red_split(self.embed_map_model, text)[0]
+        # get G/R probability
+        with torch.no_grad():
+            green_red_prob = self._get_green_red_split(self.embed_map_model, text)
 
+        # Sample G binary mappings from green_red_prob
+        green_red_maps = []
+        for _ in range(G):
+            mapping = torch.bernoulli(green_red_prob)
+            green_red_maps.append(mapping)
+        import pdb; pdb.set_trace()  # check G mappings are different, device: 
+        green_red_maps = torch.cat(green_red_maps, dim=0)  # [G, 384]
+
+        # For each mapping, compute the log probability of getting that mapping given green_red_prob
+        green_red_maps_logps = self.get_logps(green_red_maps, green_red_prob)
+
+        # Generate watermarked texts
+        green_red_splits = [m[self.mapping_list] for m in green_red_maps]
+        watermarked_texts = [self.generate_watermarked_text(text, split) for split in green_red_splits]
+        return green_red_maps, green_red_maps_logps, watermarked_texts
+    
+    def get_logps(self, mappings, green_red_prob):
+        # Compute log-probabilities for all mappings at once
+        log_prob = (
+            mappings * torch.log(green_red_prob + 1e-8) +
+            (1 - mappings) * torch.log(1 - green_red_prob + 1e-8)
+        )
+        mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
+        return mappings_logps
+
+    def generate_watermarked_text(self, text, green_red_split):
         # add prompt instruction
         messages = [
             {
@@ -233,71 +261,14 @@ class Actor(nn.Module):
         # generate watermarked text
         logits_processors = [WatermarkLogitsBias(green_red_split, self.alpha, self.delta)]
         sampling_params = SamplingParams(
-            n=G,
             top_p=0.9,
             max_tokens=500,
-            logprobs=0,  # only return logprobs for the generated tokens
             logits_processors=logits_processors,
         )
         outputs = self.watermark_model_vllm.generate([prompt], sampling_params, use_tqdm=False)
         ## save output results
-        watermarked_tuples = []
-        output_group = outputs[0].outputs
-        for o in output_group:
-            output_text = o.text
-            text_ids = o.token_ids
-            logprobs = torch.tensor([lp[id].logprob for lp, id in zip(o.logprobs, text_ids)])
-            watermarked_tuples.append((output_text, text_ids, logprobs)) 
-
-        # import pdb; pdb.set_trace()  # check generated results. device: cpu
-        return watermarked_tuples
-
-    def get_per_token_logps(self, embed_model, original_text, watermarked_texts_ids):
-        '''
-        Compute the log probabilities of the watermarked text given the original text.
-        '''
-        # get G/R split
-        green_red_split = self._get_green_red_split(embed_model, original_text)[0]
-
-        # concatenate the original text and the watermarked text
-        ## add prompt instruction
-        messages = [
-            {
-                "role": "system", "content": SYS_PROMPT,
-            },
-            {
-                "role": "user",  "content": original_text
-            },
-        ]
-        prompt = self.watermark_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        ## tokenize
-        prompt = self.watermark_tokenizer(prompt, return_tensors='pt').to(self.watermark_model.device)
-
-        all_logprobs = []
-        for wm_text_ids in watermarked_texts_ids:
-            # import pdb; pdb.set_trace()  # check line by line, check variables dimensions
-            watermarked = torch.tensor(wm_text_ids).unsqueeze(0).to(self.watermark_model.device)
-            watermarked_attention_mask = torch.ones(watermarked.size()).to(self.watermark_model.device)
-            ## concatenate
-            input_ids = torch.cat((prompt['input_ids'], watermarked), dim=1)
-            attention_mask = torch.cat((prompt['attention_mask'],watermarked_attention_mask), dim=1)
-            logits_to_keep = watermarked.size(1)  # only need to compute the logits for the watermarked tokens
-
-            per_token_logps = self._get_per_token_logps(self.watermark_model, green_red_split, input_ids, attention_mask, logits_to_keep)
-            per_token_logps = per_token_logps.squeeze(0)
-            all_logprobs.append(per_token_logps)
-            del watermarked, watermarked_attention_mask, input_ids, attention_mask, per_token_logps
-        return all_logprobs
-
-    def _get_per_token_logps(self, model, green_red_split, input_ids, attention_mask, logits_to_keep):
-        # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
-        # add waterark logits bias
-        logits = watermark_logits_bias(logits, green_red_split, self.delta, self.alpha, self.measure_threshold)
-        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-        input_ids = input_ids[:, -logits_to_keep:]
-        logits = logits[:, -logits_to_keep:]
-        return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
+        watermarked_text = outputs[0].outputs[0].text
+        return watermarked_text
 
     def _get_green_red_split(self, model, texts):
         input_ids = self.embed_map_tokenizer(
@@ -309,22 +280,12 @@ class Actor(nn.Module):
         ).to(model.device)
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
-        # import pdb; pdb.set_trace()  # check mapping shape: [B, 384]
-        if self.use_soft_split:
-            mappings = torch.sigmoid(mappings)
-        elif self.use_median_split:
-            thresholds = torch.median(mappings, dim=1).values  # [B]
-            mappings = step_ste(mappings, thresholds)
-            # import pdb; pdb.set_trace()  # count the number of 1s and 0s in mapping
-            # num_close_to_one = torch.sum((mapping > 0.99999) & (mapping <= 1.0)).item()
-            # num_close_to_zero = torch.sum((mapping >= 0.00001) & (mapping < 0.01)).item()
-        else:
-            # by default, use 0 as the threshold to divide the g/r tokens
-            mappings = sign_ste(mappings)
-            mappings = (mappings + 1) / 2
-        mappings = [m for m in mappings]
-        green_red_splits = [m[self.mapping_list].clone().to(self.watermark_model.device) for m in mappings]
-        return green_red_splits
+        # Normalize each row to [0, 1] while preserving ratios
+        min_vals = mappings.min(dim=1, keepdim=True)[0]
+        max_vals = mappings.max(dim=1, keepdim=True)[0]
+        mappings = (mappings - min_vals) / (max_vals - min_vals + 1e-8)
+        # import pdb; pdb.set_trace()  # check mapping shape: [B, 384], should have gradient
+        return mappings
 
     def _next_token_entropy(self, logits):
         """
@@ -352,9 +313,11 @@ class Actor(nn.Module):
         else:
             raise ValueError("texts should be a list of strings or a single string.")
         
-        green_red_splits = self._get_green_red_split(self.embed_map_model, texts)
+        green_red_probs = self._get_green_red_split(self.embed_map_model, texts)
         if not has_gradient:
-            green_red_splits = [g.detach() for g in green_red_splits]
+            green_red_probs = [g.detach() for g in green_red_probs]
+        green_red_probs = [m[self.mapping_list] for m in green_red_probs]
+        if has_gradient: import pdb; pdb.set_trace()  # check gradient
 
         # start_time = time.time()
         # Tokenize the batch
@@ -367,7 +330,7 @@ class Actor(nn.Module):
         # tokenization_time = time.time() - start_time
         # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
 
-        mini_batch_size = 64
+        mini_batch_size = 128
 
         all_entropy = []
         for start in range(0, len(texts), mini_batch_size):
@@ -392,7 +355,6 @@ class Actor(nn.Module):
             # entropy_time = time.time() - start_time
             # print(f"Entropy computation time: {entropy_time:.4f} seconds", flush=True)
             all_entropy.append(entropy.cpu())
-
             del logits, entropy, batch_inputs  # free memory
         # print(f"===========", flush=True)
         all_entropy = torch.cat(all_entropy, dim=0).to(self.watermark_model.device)  # [B, L-1]
@@ -401,7 +363,7 @@ class Actor(nn.Module):
         for start in range(0, len(texts), mini_batch_size):
             end = min(start + mini_batch_size, len(texts))
             batch_inputs = {k: v[start:end].to(self.watermark_model.device) for k, v in inputs.items()}
-            batch_green_red_splits = green_red_splits[start:end]
+            batch_green_red_probs = green_red_probs[start:end]
             batch_entropy = all_entropy[start:start + mini_batch_size]  # [miniB, L-1]
 
             # start_time = time.time()
@@ -417,10 +379,10 @@ class Actor(nn.Module):
             # print(f"Mask computation time: {mask_time:.4f} seconds", flush=True)
 
             # start_time = time.time()
-            green_red_splits_tensor = torch.stack(batch_green_red_splits)  # [miniB, vocab_size]
+            green_red_probs_tensor = torch.stack(batch_green_red_probs)  # [miniB, vocab_size]
             # Use gather to index: expand input_ids to [miniB, L, 1] for gather
             token_scores = torch.gather(
-                green_red_splits_tensor, 1, batch_inputs['input_ids']
+                green_red_probs_tensor, 1, batch_inputs['input_ids']
             )
             # token_score_time = time.time() - start_time
             # print(f"Token score computation time: {token_score_time:.4f} seconds", flush=True)
@@ -430,12 +392,12 @@ class Actor(nn.Module):
             scores.append(scores_)
             # score_time = time.time() - start_time
             # print(f"Score computation time: {score_time:.4f} seconds", flush=True)
-            del batch_inputs, batch_green_red_splits, batch_entropy  # free memory
+            del batch_inputs, batch_green_red_probs, batch_entropy  # free memory
 
         # print(f"===========", flush=True)
-        del all_entropy, inputs, green_red_splits  # free memory
+        del all_entropy, inputs, green_red_probs  # free memory
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
-        # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
+        if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
         return scores
 
@@ -476,7 +438,7 @@ class Actor(nn.Module):
             attack_hate_texts = attack_texts['hate']
         else:
             # watermarked_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = run_attacks(watermarked_tuples, self.attack_client, self.attack_tokenizer)
-            batch['attack_texts'] = run_attacks(batch['watermarked_tuples'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
+            batch['attack_texts'] = run_attacks(batch['watermarked_texts'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
             attack_para_texts, attack_senti_texts, attack_hate_texts = batch['attack_texts']['para'], batch['attack_texts']['senti'], batch['attack_texts']['hate']
 
         ## detect
@@ -485,7 +447,7 @@ class Actor(nn.Module):
         detect_para, detect_senti, detect_hate = [], [], []
         has_gradient = True if attack_texts else False
         B = len(batch['original_text'])  # batch size
-        G = len(batch['watermarked_tuples'][0])  # rollout size
+        G = len(batch['watermarked_texts'][0])  # rollout size
         
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
@@ -493,7 +455,7 @@ class Actor(nn.Module):
         detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient)
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm = self.detect([t[0] for g in batch['watermarked_tuples'] for t in g], has_gradient=wm_has_gradient)
+        detect_wm = self.detect([t for g in batch['watermarked_texts'] for t in g], has_gradient=wm_has_gradient)
         detect_wm = regroup_list(detect_wm, B, G)
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
@@ -625,7 +587,7 @@ if __name__ == "__main__":
         args.curriculum = None
 
     if not args.run_name:
-        args.run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
+        args.run_name = f"actor_embed-batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
 
         if not args.curriculum:
             args.run_name += (
@@ -734,18 +696,18 @@ if __name__ == "__main__":
             # prepare curriculum
             detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.curriculum_steps, detect_score_coefs)
 
-            batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
+            batch = defaultdict(list)
+            batch['original_text'] = train_set[iteration : iteration + args.batch_size]
 
-            # rollout before optimization
-            batch['watermarked_tuples'] = []  # [B, G], each is (wm_text, wm_text_ids, logprobs)
             ## rollout
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
-                with torch.no_grad():
-                    watermarked_tuples = actor.rollout(original_data, args.G)  # device: cpu
-                batch['watermarked_tuples'].append(watermarked_tuples)
-            # import pdb; pdb.set_trace()  # check all_watermarked_tuples shape
+                green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G)  # device: cpu
+                batch['green_red_maps'].append(green_red_maps)  # 
+                batch['green_red_maps_logps'].append(green_red_maps_logps)  #
+                batch['watermarked_texts'].append(watermarked_texts)  # 
+            # import pdb; pdb.set_trace()  # check shape
             
             ## compute rewards
             result_dict = actor.compute_rewards(
@@ -827,7 +789,9 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 mb_original_text = [batch['original_text'][idx] for idx in mb_inds]  # [mb_size]
-                mb_watermarked_tuples = [batch['watermarked_tuples'][idx] for idx in mb_inds]  # [mb_size, G*(wm_texts, wm_text_ids, logprobs)]
+                mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
+                mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
+                mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G]
                 mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G]}
                 # Flatten each [mb_size, G] list of lists into a single list for each attack type
                 mb_attack_texts = {k: [item for sublist in v for item in sublist] for k, v in mb_attack_texts.items()}  # {attack_name: [mb_size*G]}
@@ -836,15 +800,16 @@ if __name__ == "__main__":
 
                 ### get on policy log probabilities and rewards
                 start_time = time.time()
-                new_mb_logprobs = []  # [mb_size, G, seq_len_i]
-                all_per_token_kl = []  # [mb_size, G, seq_len_i]
-                for original_text, watermarked_tuples in zip(mb_original_text, mb_watermarked_tuples):
-                    new_logprobs = actor.get_per_token_logps(actor.embed_map_model, original_text, [t[1] for t in watermarked_tuples])  # [G, seq_len_i]
-                    # import pdb; pdb.set_trace()  # check if new_logprobs has gradient, device: gpu1(tf wm model)
+                new_mb_logprobs = []  # [mb_size, G, 384]
+                all_per_token_kl = []  # [mb_size, G, 384]
+                for original_text, green_red_maps in zip(mb_original_text, mb_green_red_maps):
+                    green_red_prob = actor._get_green_red_split(actor.embed_map_model, original_text)
+                    new_logprobs = actor.get_logps(green_red_maps, green_red_prob)
                     new_mb_logprobs.append(new_logprobs)
                     if args.beta != 0.0:
                         with torch.no_grad():
-                            ref_logprobs = actor.get_per_token_logps(actor.reference_embed_map_model, original_text, [t[1] for t in watermarked_tuples])
+                            green_red_prob = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
+                            ref_logprobs = actor.get_logps(green_red_maps, green_red_prob)
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
                             all_per_token_kl.append(per_token_kl)
@@ -858,7 +823,7 @@ if __name__ == "__main__":
                     result_dict = actor.compute_rewards(
                         {
                             'original_text': mb_original_text,
-                            'watermarked_tuples': mb_watermarked_tuples
+                            'watermarked_texts': mb_watermarked_texts
                         },
                         args.binary,
                         detect_score_coefs,
@@ -904,7 +869,7 @@ if __name__ == "__main__":
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
                         new_logprobs = new_mb_logprobs[j][i]  # [seq_len_i]
-                        old_logprobs = mb_watermarked_tuples[j][i][2]
+                        old_logprobs = mb_green_red_maps_logps[j][i]
                         old_logprobs = old_logprobs.to(new_logprobs.device)
                         # import pdb; pdb.set_trace()  # new: has gradient, old: no gradient
                         try:
@@ -977,7 +942,7 @@ if __name__ == "__main__":
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 ### free memory
-                del mb_original_text, mb_watermarked_tuples, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
+                del mb_original_text, mb_green_red_maps, mb_green_red_maps_logps, mb_watermarked_texts, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -990,19 +955,20 @@ if __name__ == "__main__":
 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    valid_batch = {'original_text': valid_set}
-                    valid_batch['watermarked_tuples'] = []  # [B, G=1], each is (wm_text, wm_text_ids, logprobs)
-                    for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
-                        valid_original_data = valid_set[data_idx]
-                        # watermarking
-                        with torch.no_grad():
-                            valid_watermarked_tuples = actor.rollout(valid_original_data, 1)
-                        valid_batch['watermarked_tuples'].append(valid_watermarked_tuples)
-                        # import pdb; pdb.set_trace()  # check if valid_watermarked_tuples shape: [(wm_text, wm_text_ids, logprobs)]
+                    # watermark
+                    with torch.no_grad():
+                        green_red_probs = actor._get_green_red_split(actor.embed_map_model, valid_set)
+                    green_red_maps = torch.bernoulli(green_red_probs)
+                    green_red_splits = [m[actor.mapping_list] for m in green_red_maps]
+                    watermarked_texts = [actor.generate_watermarked_text(text, split) for text, split in zip(valid_set, green_red_splits)]
                     # attack
-                    result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs)
-                    valid_batch = result_dict['batch']
-                    # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
+                    result_dict = actor.compute_rewards(
+                        {
+                            'original_text': valid_set,
+                            'watermarked_texts': watermarked_texts,
+                        }, 
+                        args.binary, detect_score_coefs)
+                    # import pdb; pdb.set_trace()  # check if result_dict['batch']['rewards'] has gradient, check detection shape
                     # Log the median of each score to wandb
                     def safe_median(x):
                         x = [v for v in x if v is not None]

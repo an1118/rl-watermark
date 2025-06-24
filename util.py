@@ -131,15 +131,15 @@ def fill_na(values):
     return [avg_value if v is None else v for v in values]
 
 
-def run_attacks(watermarked_tuples, detect_score_coefs, client=None, tokenizer=None):
+def run_attacks(watermarked_texts, detect_score_coefs, client=None, tokenizer=None):
     """
     Args:
-        watermarked_tuples (list): [B, G], each is (wm_text, wm_text_ids, logprobs)
+        watermarked_texts (list): [B, G], each is a string of watermarked text
         detect_score_coefs (dict): include the specific attack if corresponding value is not zero
     """
     attack_flags = {k: bool(v) for k, v in detect_score_coefs.items() if k not in ('ori', 'wm')}
     if client is not None and tokenizer is not None:
-        attack_texts = run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer)
+        attack_texts = run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer)
     else:  # TODO
         raise NotImplementedError("run_attacks_api is not implemented for this case")
         # wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_api(watermarked_tuples)

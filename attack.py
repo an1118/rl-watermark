@@ -384,11 +384,11 @@ def vllm_generate_responses(texts, prompts, client, tokenizer):
     return generated_texts
 
 
-def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
+def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
     '''
     Run all attacks for one group of watermarked texts and return the attack results.
     Args:
-        watermarked_tuples (list): [B, G], each is (wm_text, wm_text_ids, logprobs)
+        watermarked_texts (list): [B, G], each is a string of watermarked text.
         attack_flags (dict): A dictionary indicating which attacks to run, e.g., {'para': True, 'senti': True, 'hate': True}.
     '''
     attack_flags = {'para': True, 'senti': True, 'hate': True}  # TODO
@@ -403,9 +403,9 @@ def run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer):
         assert len(flat_list) == batch * group, "Input list length does not match B*G"
         return [flat_list[i * group:(i + 1) * group] for i in range(batch)]
     
-    B = len(watermarked_tuples)
-    G = len(watermarked_tuples[0])
-    watermarked_texts = [t[0] for b in watermarked_tuples for t in b]  # flatten all watermarked texts
+    B = len(watermarked_texts)
+    G = len(watermarked_texts[0])
+    watermarked_texts = [t for b in watermarked_texts for t in b]  # flatten all watermarked texts
 
     # paraphrase attack
     if attack_flags['para']:
