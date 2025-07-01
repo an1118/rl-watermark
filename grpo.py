@@ -154,8 +154,9 @@ class Args:
             raise ValueError("use_median_split and add_gr_loss cannot both be True.")
         if self.attack_model_name is not None and self.attack_model_url is None:
             raise ValueError("If `attack_model_name` is specified, `attack_model_url` must also be provided.")
-        if self.curriculum_steps and self.curriculum_steps % self.num_minibatches != 0:
-            raise ValueError("curriculum_steps must be a multiple of num_minibatches.")
+        if self.curriculum.lower() != "none":
+            if self.detect_steps % self.num_minibatches != 0 or self.spoof_steps % self.num_minibatches != 0:
+                raise ValueError("detect_steps and spoof_steps must be a multiple of num_minibatches.")
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
