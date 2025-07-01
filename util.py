@@ -231,13 +231,31 @@ def exponential_schedule(step, max_step, growth_rate, min_val=1, max_val=100):
     return min_val + (max_val - min_val) * coeff
 
 
-def smooth_band_boost(score, center=0.5, width=0.1, sharpness=10, min_coeff=0.0, max_coeff=100):
+def gap(score, center=0.5, width=0.1, sharpness=10, min_coeff=0.0, max_coeff=100):
     if abs(score - center) <= width:
         return 0.0
     # Push values toward 0 if near center, toward 1 if far from center
     dist_from_center = abs(score - center)
     coeff = 1 / (1 + math.exp(-sharpness * (dist_from_center - width)))
     return min_coeff + (max_coeff - min_coeff) * coeff
+
+def smooth_gap(score, center=0.5, width1=0.05, width2=0.15, growth_rate1=50, growth_rate2=250, max_value=70):
+    """
+    Piecewise continuous function:
+    - If |score-center| <= width1: return 0
+    - If width1 < |score-center| <= width2: linearly increase from 0 with growth_rate1
+    - If |score-center| > width2: linearly increase from value at width2 with growth_rate2
+    """
+    dist = abs(score - center)
+    if dist <= width1:
+        value = 0.0
+    elif dist <= width2:
+        value = growth_rate1 * (dist - width1)
+    else:
+        bias = growth_rate1 * (width2 - width1)
+        val = growth_rate2 * (dist - width2)
+        value = min(max_value, bias + val)
+    return value
 
 
 def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_detect_score_coefs):
@@ -289,7 +307,7 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
     return detect_score_coefs
 
 
-def coef_strategy(strategy, score, coef, target_score, step, max_step, growth_rate):
+def coef_strategy(strategy, score, coef, target_score, step, max_step, growth_rate, growth_rate2=None):
     if strategy == 'raw':
         pass
     elif strategy == 'abs':
@@ -300,7 +318,11 @@ def coef_strategy(strategy, score, coef, target_score, step, max_step, growth_ra
         score = abs(score - target_score)
     elif strategy == 'gap':
         assert target_score is not None, "Missing target_score for 'gap'."
-        coef = smooth_band_boost(score, center=target_score, sharpness=growth_rate)
+        coef = gap(score, center=target_score, sharpness=growth_rate)
+        score = abs(score - target_score)
+    elif strategy == 'smooth_gap':
+        assert target_score is not None, "Missing target_score for 'smooth_gap'."
+        coef = smooth_gap(score, center=target_score, growth_rate1=growth_rate, growth_rate2=growth_rate2)
         score = abs(score - target_score)
     else:
         raise ValueError(f"Unknown score strategy: {strategy}")

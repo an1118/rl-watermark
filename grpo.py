@@ -22,8 +22,7 @@ from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
-    regroup_list, exponential_schedule, smooth_band_boost,
-    curriculum_learning_schedule, coef_strategy
+    regroup_list, curriculum_learning_schedule, coef_strategy
 )
 from text_quality_score import _judge_text_quality
 
@@ -55,10 +54,12 @@ class Args:
     """the number of mini-batches"""
     G: int = 8  # 8
     """the number of rollouts generated for each original text"""
+    lr_scheduler_type: str = "constant"
+    """the type of learning rate scheduler, can be one of [linear, constant]"""
     learning_rate: float = 1e-5
     """the learning rate of the optimizer"""
-    anneal_lr: bool = False
-    """Toggle learning rate annealing for policy and value networks"""
+    warmup_steps: int = 0
+    """the number of warmup steps for the learning rate scheduler"""
     clip_coef: float = 0.2
     """the surrogate clipping coefficient"""
     max_grad_norm: float = 0.5
@@ -92,16 +93,18 @@ class Args:
     """the target detection score of the original text, used to calculate the reward"""
     ori_growth_rate: float = 1.0
     """the growth rate of the original text's detection score, used to calculate the reward"""
+    ori_growth_rate2: float = 1.0
+    """the growth rate of the original text's detection score, used when 'ori_score_strategy' is 'smooth_gap'"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
     wm_score_strategy: str = "dynamic"
-    """the strategy to compute the watermarked text's score, can be one of [raw, abs, dynamic, gap]"""
+    """the strategy to compute the watermarked text's score, can be one of [raw, dynamic]"""
     wm_growth_rate: float = 1.0
     """the growth rate of the watermarked text's detection score, used to calculate the reward"""
     detect_score_coefs_para: float = 1.0
     """the coefficient of the paraphrased text's detection score in the reward calculation"""
     para_score_strategy: str = "dynamic"
-    """the strategy to compute the paraphrased text's score, can be one of [raw, abs, dynamic, gap]"""
+    """the strategy to compute the paraphrased text's score, can be one of [raw, dynamic]"""
     para_growth_rate: float = 1.0
     """the growth rate of the paraphrased text's detection score, used to calculate the reward"""
     detect_score_coefs_senti: float = 1.0
@@ -340,6 +343,21 @@ class Actor(nn.Module):
         probs = torch.nn.functional.softmax(logits, dim=-1)  # [B, L, V]
         entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)  # [B, L]
         return entropy
+
+    def get_green_token_ratio(self, texts):
+        """
+        Get the green token ratio for the given texts.
+
+        Args:
+            texts (list of str): List of input texts.
+
+        Returns:
+            list: List of green token ratios for each text.
+        """
+        green_red_splits = self._get_green_red_split(self.embed_map_model, texts)
+        green_red_splits = [g.detach() for g in green_red_splits]
+        ratios = [(torch.sum(green_red_split) / len(green_red_split)).item() for green_red_split in green_red_splits]
+        return ratios
     
     def detect(self, texts, has_gradient=True):
         if isinstance(texts, list):
@@ -449,6 +467,7 @@ class Actor(nn.Module):
         target_ori_score=None, 
         max_step=None, 
         ori_growth_rate=None,
+        ori_growth_rate2=None,
         wm_score_strategy='raw',
         wm_growth_rate=None,
         para_score_strategy='raw',
@@ -561,7 +580,7 @@ class Actor(nn.Module):
                 else:
                     # different ways to calculate score and coefficient
                     d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
-                        ori_score_strategy, d_ori, detect_score_coefs['ori'], target_ori_score, self.global_step, max_step, ori_growth_rate)
+                        ori_score_strategy, d_ori, detect_score_coefs['ori'], target_ori_score, self.global_step, max_step, ori_growth_rate, ori_growth_rate2)
                     _, detect_score_coefs['wm'] = coef_strategy(
                         wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, max_step, wm_growth_rate)
                     _, detect_score_coefs['para'] = coef_strategy(
@@ -625,7 +644,11 @@ if __name__ == "__main__":
         args.curriculum = None
 
     if not args.run_name:
-        args.run_name = f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}-clip{args.clip_coef}-beta{args.beta}"
+        args.run_name = (
+            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
+            f"-clip{args.clip_coef}-beta{args.beta}"
+            f"-lr_{args.learning_rate}_{args.lr_scheduler_type}_{args.warmup_steps}"
+        )
 
         if not args.curriculum:
             args.run_name += (
@@ -660,6 +683,8 @@ if __name__ == "__main__":
             args.run_name = args.run_name.replace(f"ori({args.ori_score_strategy})", f"ori({args.ori_score_strategy}-{args.target_ori_score})")
         elif args.ori_score_strategy in ['dynamic', 'gap']:
             args.run_name = args.run_name.replace(f"ori({args.ori_score_strategy})", f"ori({args.ori_score_strategy}-{args.ori_growth_rate})")
+        elif args.ori_score_strategy == 'smooth_gap':
+            args.run_name = args.run_name.replace(f"ori({args.ori_score_strategy})", f"ori({args.ori_score_strategy}-{args.ori_growth_rate}-{args.ori_growth_rate2})")
         if args.wm_score_strategy in ['dynamic']:
             args.run_name = args.run_name.replace(f"wm({args.wm_score_strategy})", f"wm({args.wm_score_strategy}-{args.wm_growth_rate})")
         if args.para_score_strategy in ['dynamic']:
@@ -708,6 +733,25 @@ if __name__ == "__main__":
         use_median_split=args.use_median_split,
     )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
+    # Choose learning rate scheduler based on argument
+    lr_scheduler_type = getattr(args, "lr_scheduler_type", "constant").lower()
+
+    if lr_scheduler_type == "linear":
+        from transformers import get_linear_schedule_with_warmup
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=args.warmup_steps,
+            num_training_steps=args.max_step
+        )
+    elif lr_scheduler_type == "constant":
+        from transformers import get_constant_schedule_with_warmup
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=args.warmup_steps
+        )
+    else:
+        raise ValueError(f"Unknown lr_scheduler_type: {lr_scheduler_type}")
+
     train_set = load_dataset(args.dataset_name, split='train')
     train_set = train_set['original']
     if args.do_eval:
@@ -724,12 +768,6 @@ if __name__ == "__main__":
 
 
     for epoch in range(1, args.num_iterations + 1):
-        # Annealing the rate if instructed to do so.  TODO
-        if args.anneal_lr:
-            frac = 1.0 - (epoch - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
             # prepare curriculum
             detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.curriculum_steps, detect_score_coefs)
@@ -756,6 +794,7 @@ if __name__ == "__main__":
                 target_ori_score=args.target_ori_score,
                 max_step=args.max_step,
                 ori_growth_rate=args.ori_growth_rate,
+                ori_growth_rate2=args.ori_growth_rate2,
                 wm_score_strategy=args.wm_score_strategy,
                 wm_growth_rate=args.wm_growth_rate,
                 para_score_strategy=args.para_score_strategy,
@@ -867,6 +906,7 @@ if __name__ == "__main__":
                         target_ori_score=args.target_ori_score,
                         max_step=args.max_step,
                         ori_growth_rate=args.ori_growth_rate,
+                        ori_growth_rate2=args.ori_growth_rate2,
                         wm_score_strategy=args.wm_score_strategy,
                         wm_growth_rate=args.wm_growth_rate,
                         para_score_strategy=args.para_score_strategy,
@@ -983,10 +1023,13 @@ if __name__ == "__main__":
                 loss.backward()
                 nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
                 optimizer.step()
+                scheduler.step()
 
                 global_step += 1
                 actor.global_step = global_step  # update global step in actor
                 print("Step", global_step, "loss:", loss.item())
+                current_lr = optimizer.param_groups[0]['lr']
+                wandb.log({"train/learning_rate": current_lr}, step=global_step)
 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
@@ -1015,6 +1058,13 @@ if __name__ == "__main__":
                         "eval/median_para_score": safe_median(result_dict['detect_para']),
                         "eval/median_senti_score": safe_median(result_dict['detect_senti']),
                         "eval/median_hate_score": safe_median(result_dict['detect_hate']),
+                    }, step=global_step)
+                    # Compute and log green token ratios
+                    green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
+                    wandb.log({
+                        "eval/green_ratio_mean": np.mean(green_token_ratios),
+                        "eval/green_ratio_max": np.max(green_token_ratios),
+                        "eval/green_ratio_min": np.min(green_token_ratios),
                     }, step=global_step)
                     # Compute and log the auc for each dimension
                     auc_detect, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_wm'])
