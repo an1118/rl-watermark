@@ -82,9 +82,11 @@ class Args:
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
     curriculum: str = "none"
-    """the curriculum strategy to use, can be one of [v1]"""
-    curriculum_steps: int = 6
-    """the number of steps to increase the difficulty of the curriculum"""
+    """the curriculum strategy to use, can be one of [v1, v2]"""
+    detect_steps: int = 10
+    """the number of steps for the detection phase in curriculum learning"""
+    spoof_steps: int = 5
+    """the number of steps for the spoofing phase in curriculum learning"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
     ori_score_strategy: str = "dynamic"
@@ -659,7 +661,7 @@ if __name__ == "__main__":
             )
         else:
             args.run_name += (
-                f"-ct_{args.curriculum}_step{args.curriculum_steps}"
+                f"-ct_{args.curriculum}_d{args.detect_steps}_s{args.spoof_steps}"
                 f"_ori({args.ori_score_strategy})"
                 f"wm({args.wm_score_strategy})"
                 f"para({args.para_score_strategy})"
@@ -770,7 +772,7 @@ if __name__ == "__main__":
     for epoch in range(1, args.num_iterations + 1):
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
             # prepare curriculum
-            detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.curriculum_steps, detect_score_coefs)
+            detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.detect_steps, args.spoof_steps, detect_score_coefs)
 
             batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
 

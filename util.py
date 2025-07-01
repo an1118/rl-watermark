@@ -258,12 +258,17 @@ def smooth_gap(score, center=0.5, width1=0.05, width2=0.15, growth_rate1=50, gro
     return value
 
 
-def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_detect_score_coefs):
+def curriculum_learning_schedule(curriculum, step, detect_steps, spoof_steps, original_detect_score_coefs):
     if curriculum == 'v1':
         # Curriculum logic: 
-        # if (step // curriculum_steps) is even, then train {ori, wm, para}
-        # elif it's odd, then train {senti, hate}
-        if (step // curriculum_steps) % 2 == 0:
+        # First detect_steps: train {ori, wm, para}
+        # Next spoof_steps: train {senti, hate}
+        # Then repeat the cycle
+        cycle_length = detect_steps + spoof_steps
+        position_in_cycle = step % cycle_length
+        
+        if position_in_cycle < detect_steps:
+            # Detection phase
             detect_score_coefs = {
                 "ori": 1.0,
                 "wm": 1.0,
@@ -271,7 +276,9 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
                 "senti": 0.0,
                 "hate": 0.0,
             }
+            phase = "detect"
         else:
+            # Spoofing phase
             detect_score_coefs = {
                 "ori": 0.0,
                 "wm": 0.0,
@@ -279,11 +286,17 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
                 "senti": 1.0,
                 "hate": 1.0,
             }
+            phase = "spoof"
     elif curriculum == 'v2':
         # Curriculum logic: 
-        # if (step // curriculum_steps) is even, then train {ori, wm, para}
-        # elif it's odd, then train {ori, senti, hate}
-        if (step // curriculum_steps) % 2 == 0:
+        # First detect_steps: train {ori, wm, para}
+        # Next spoof_steps: train {ori, senti, hate}
+        # Then repeat the cycle
+        cycle_length = detect_steps + spoof_steps
+        position_in_cycle = step % cycle_length
+        
+        if position_in_cycle < detect_steps:
+            # Detection phase
             detect_score_coefs = {
                 "ori": 1.0,
                 "wm": 1.0,
@@ -291,7 +304,9 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
                 "senti": 0.0,
                 "hate": 0.0,
             }
+            phase = "detect"
         else:
+            # Spoofing phase
             detect_score_coefs = {
                 "ori": 1.0,
                 "wm": 0.0,
@@ -299,11 +314,17 @@ def curriculum_learning_schedule(curriculum, step, curriculum_steps, original_de
                 "senti": 1.0,
                 "hate": 1.0,
             }
+            phase = "spoof"
     else:
         detect_score_coefs = original_detect_score_coefs
-        print(f"[Curriculum] Not using curriculum learning.")
+        phase = "original"
+        print(f"[Curriculum] Not using curriculum learning.", flush=True)
 
-    print(f"[Curriculum] Training {detect_score_coefs} at step {step}", flush=True)
+    if curriculum in ['v1', 'v2']:
+        cycle_num = step // (detect_steps + spoof_steps)
+        position_in_cycle = step % (detect_steps + spoof_steps)
+        print(f"[Curriculum] Cycle {cycle_num}, {phase} phase (step {position_in_cycle}/{detect_steps if phase == 'detect' else spoof_steps}), training {detect_score_coefs} at step {step}", flush=True)
+    
     return detect_score_coefs
 
 
