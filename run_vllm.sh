@@ -6,8 +6,8 @@
 #SBATCH --partition=hpg-b200
 ##SBATCH --reservation=buyuheng 
 #SBATCH --gpus=4
-#SBATCH --mem=128gb
-#SBATCH --time=5-00:00:00
+#SBATCH --mem=64gb
+#SBATCH --time=3-00:00:00
 ##SBATCH --exclude=c0903a-s25
 
 # module load cuda
@@ -63,7 +63,7 @@ clip_coef=0.2
 beta=0.04
 
 learning_rate=1e-5
-lr_scheduler_type=constant
+lr_scheduler_type=linear
 warmup_steps=0
 
 binary=false  # if true, how to add second gradient
@@ -72,7 +72,7 @@ use_median_split=false
 add_reward_gradient=true
 add_gr_loss=false
 curriculum="v2"
-detect_steps=12
+detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
 ori_score_strategy="gap"  # [raw, abs, dynamic, gap, smooth_gap]
@@ -98,7 +98,7 @@ run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_$
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
-  run_id="${run_id}-ct_${curriculum}d${detect_steps}_s${spoof_steps}_ori(${ori_score_strategy})wm(${wm_score_strategy})para(${para_score_strategy})"
+  run_id="${run_id}-ct_${curriculum}_d${detect_steps}s${spoof_steps}_ori(${ori_score_strategy})wm(${wm_score_strategy})para(${para_score_strategy})"
 fi
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"

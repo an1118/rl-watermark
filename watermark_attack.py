@@ -253,7 +253,7 @@ def base_attack(messages, max_tokens=500, max_call=10):
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens=max_tokens, model='gpt-4o')
+            response = call_chatgpt_api(messages, max_tokens=max_tokens, model='gpt-4o-mini')
         except RetryError as e:
             print(e)
             return None
@@ -295,7 +295,7 @@ def extract_info(text):
 
 def spoofing_attack(text):
     # return: original_sentiment, target_modified_sentiment, modified_sentiment, spoofing_text, output_text
-    original_sentiment = sentiment_judge(text, model='gpt-4o')
+    original_sentiment = sentiment_judge(text, model='gpt-4o-mini')
     target_modified_sentiment = decide_modified_sentiment(original_sentiment)
     max_change = int(len(text.split()) * 0.2)
     
@@ -316,7 +316,7 @@ def spoofing_attack(text):
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens, model='gpt-4o')
+            response = call_chatgpt_api(messages, max_tokens, model='gpt-4o-mini')
         except RetryError as e:
             print(e)
             result_dict = {
@@ -339,7 +339,7 @@ def spoofing_attack(text):
                 spoofing_text = output_text
 
             # check if the sentiment is correctly modified
-            modified_sentiment = sentiment_judge(spoofing_text, model='gpt-4o')
+            modified_sentiment = sentiment_judge(spoofing_text, model='gpt-4o-mini')
             if modified_sentiment == target_modified_sentiment:
                 keep_call = False
             elif modified_sentiment != original_sentiment:
@@ -411,7 +411,7 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment):
     while(keep_call):
         # Make the API call
         try:
-            response = call_chatgpt_api(messages, max_tokens, model='gpt-4o')
+            response = call_chatgpt_api(messages, max_tokens, model='gpt-4o-mini')
         except RetryError as e:
             print(e)
             result_dict = {
@@ -443,7 +443,7 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment):
                 spoofing_text = output_text
             spoofing_text = unchanged_text + ' ' + spoofing_text
             # check if the sentiment is correctly modified
-            modified_sentiment = sentiment_judge(spoofing_text, model='gpt-4o')
+            modified_sentiment = sentiment_judge(spoofing_text, model='gpt-4o-mini')
             if modified_sentiment == target_modified_sentiment:
                 keep_call = False
             elif modified_sentiment != original_sentiment:
