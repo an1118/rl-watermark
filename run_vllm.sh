@@ -94,7 +94,7 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+run_id="vocab-batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else

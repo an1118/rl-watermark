@@ -117,7 +117,7 @@ class Args:
     """the coefficient of the hate attacked text's detection score in the reward calculation"""
 
     # Watermark specific arguments
-    embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
+    embed_map_model_name: str = r"/blue/buyuheng/li_an.ucsb/projects/contrastive-watermark/contrastive_train/result/map_to_vocab_size/64batch_15epochs/llama8gpt8-sent1-latter_sent1-hate1/loss_margin0.9"
     """the name of the embedding model"""
     watermark_model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
     """the name of the watermark model"""
@@ -328,8 +328,7 @@ class Actor(nn.Module):
             # by default, use 0 as the threshold to divide the g/r tokens
             mappings = sign_ste(mappings)
             mappings = (mappings + 1) / 2
-        mappings = [m for m in mappings]
-        green_red_splits = [m[self.mapping_list].clone().to(self.watermark_model.device) for m in mappings]
+        green_red_splits = [m.clone().to(self.watermark_model.device) for m in mappings]
         return green_red_splits
 
     def _next_token_entropy(self, logits):
@@ -648,7 +647,7 @@ if __name__ == "__main__":
 
     if not args.run_name:
         args.run_name = (
-            f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
+            f"vocab-batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
             f"-clip{args.clip_coef}-beta{args.beta}"
             f"-lr_{args.learning_rate}_{args.lr_scheduler_type}_{args.warmup_steps}"
         )
