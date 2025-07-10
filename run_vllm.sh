@@ -50,8 +50,9 @@ fi
 
 repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
-branch="sanity-detect_attack-v2"
+branch="sanity-detect_attack-v2" # sanity-detect_attack-v2 embed_vocab_size
 
+watermark_model_name="Qwen/Qwen2.5-7B-Instruct"  # Qwen/Qwen2.5-7B-Instruct meta-llama/Llama-3.1-8B-Instruct
 is_sanity_check=false 
 seed=666
 
@@ -63,7 +64,7 @@ clip_coef=0.2
 beta=0.04
 
 learning_rate=1e-5
-lr_scheduler_type=linear
+lr_scheduler_type=constant
 warmup_steps=0
 
 binary=false  # if true, how to add second gradient
@@ -71,13 +72,13 @@ use_soft_split=false
 use_median_split=false
 add_reward_gradient=true
 add_gr_loss=false
-curriculum="v2"
+curriculum="none"
 detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="gap"  # [raw, abs, dynamic, gap, smooth_gap]
+ori_score_strategy="smooth_gap"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
-ori_growth_rate=5
+ori_growth_rate=50
 ori_growth_rate2=250
 detect_score_coefs_wm=1
 wm_score_strategy="raw"
@@ -95,6 +96,16 @@ eval_batch_size=100  # 100
 
 
 run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+watermark_model_name_lower=$(echo "$watermark_model_name" | tr '[:upper:]' '[:lower:]')
+if [[ "$watermark_model_name_lower" == *"llama"* ]]; then
+  model_name="llama"
+elif [[ "$watermark_model_name_lower" == *"qwen"* ]]; then
+  model_name="qwen"
+else
+  echo "Unsupported watermark model name. Please add another model name to the if-else statement." >&2
+  exit 1
+fi
+run_id="${model_name}-${run_id}"
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
@@ -145,6 +156,7 @@ cp /blue/buyuheng/li_an.ucsb/projects/rl-watermark/api.py $clone_dir/api.py
 
 CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --seed $seed \
+  --watermark_model_name $watermark_model_name \
   --max_step $max_step \
   --batch_size $batch_size \
   --num_minibatches $num_minibatches \

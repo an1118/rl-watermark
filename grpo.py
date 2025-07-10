@@ -188,7 +188,7 @@ class Actor(nn.Module):
         self.gpu2 = torch.device(f"cuda:2")  # for embed model
 
         self.watermark_model_vllm = LLM(
-            model="meta-llama/Llama-3.1-8B-Instruct", 
+            model=watermark_model_name, 
             tensor_parallel_size=1,
             max_model_len=2000,
         )
@@ -647,6 +647,12 @@ if __name__ == "__main__":
         args.curriculum = None
 
     if not args.run_name:
+        if 'llama' in args.watermark_model_name.lower():
+            model_name = 'llama'
+        elif 'qwen' in args.watermark_model_name.lower():
+            model_name = 'qwen'
+        else:
+            raise ValueError("Unsupported watermark model name. Please add another model name to the if-else statement.")
         args.run_name = (
             f"batch{args.batch_size}-nmini{args.num_minibatches}-G{args.G}"
             f"-clip{args.clip_coef}-beta{args.beta}"
