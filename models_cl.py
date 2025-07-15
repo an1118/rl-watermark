@@ -20,16 +20,15 @@ class ResidualBlock(nn.Module):
         return out
 
 class SemanticModel(nn.Module):
-    def __init__(self, num_layers=2, input_dim=768, hidden_dim=512, output_dim=384):
+    def __init__(self, num_layers=2, input_dim=768, hidden_dim=256, output_dim=128256):
         super(SemanticModel, self).__init__()
         
         self.layers = nn.ModuleList()
         
         self.layers.append(nn.Linear(input_dim, hidden_dim))
         
-        for _ in range(num_layers):
-            self.layers.append(ResidualBlock(hidden_dim))
-
+        self.layers.append(nn.ReLU())
+        
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, x):
@@ -280,10 +279,14 @@ class RobertaForCL(RobertaForSequenceClassification):
 
         self.classifier = RobertaClassificationHeadForEmbedding(config)
 
-        if self.model_args:
-            cl_init(self, config)
-
-        self.map = SemanticModel(input_dim=768)
+        embed_output_dim = None
+        if self.model_args is not None and hasattr(self.model_args, "embed_output_dim"):
+            embed_output_dim = self.model_args.embed_output_dim
+        elif hasattr(config, "embed_output_dim"):
+            embed_output_dim = config.embed_output_dim
+        else:
+            raise ValueError("embed_output_dim must be specified in model_args or config")
+        self.map = SemanticModel(input_dim=768, output_dim=embed_output_dim)
 
         # Initialize weights and apply final processing
         self.post_init()

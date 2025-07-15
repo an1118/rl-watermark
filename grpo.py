@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import tyro
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from vllm import LLM, SamplingParams
 from datasets import load_dataset
 from openai import OpenAI
@@ -119,6 +119,8 @@ class Args:
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
     """the name of the embedding model"""
+    embed_output_dim: int = 1024
+    """the output dimension of the embedding model"""
     watermark_model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
     """the name of the watermark model"""
     attack_model_name: str = "Qwen/Qwen3-14B"  # "Qwen/Qwen3-14B"
@@ -175,6 +177,7 @@ class Actor(nn.Module):
     def __init__(
         self, 
         embed_map_model_name, 
+        embed_output_dim,
         watermark_model_name, 
         attack_model_name, 
         attack_model_url, 
@@ -194,7 +197,12 @@ class Actor(nn.Module):
         )
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
-        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
+        config = AutoConfig.from_pretrained(embed_map_model_name)
+        config.embed_output_dim = embed_output_dim
+        self.embed_map_model = RobertaForCL.from_pretrained(
+            embed_map_model_name,
+            config=config
+        ).to(self.gpu2)
         self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
         for param in self.embed_map_model.parameters():
             param.requires_grad = True
@@ -206,7 +214,7 @@ class Actor(nn.Module):
             param.requires_grad = False  # freeze the watermark model
 
         vocabulary_size = self.watermark_model.config.vocab_size
-        self.mapping_list = vocabulary_mapping(vocabulary_size, 384, seed=66)
+        self.mapping_list = vocabulary_mapping(vocabulary_size, embed_output_dim, seed=66)
 
         self.attack_tokenizer = AutoTokenizer.from_pretrained(attack_model_name) if attack_model_name else None
         self.attack_client = OpenAI(api_key="EMPTY", base_url=attack_model_url) if attack_model_url else None
@@ -735,6 +743,7 @@ if __name__ == "__main__":
     # env setup
     actor = Actor(
         embed_map_model_name=args.embed_map_model_name,
+        embed_output_dim=args.embed_output_dim,
         watermark_model_name=args.watermark_model_name,
         attack_model_name=args.attack_model_name,
         attack_model_url=args.attack_model_url,

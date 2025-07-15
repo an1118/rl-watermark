@@ -8,7 +8,6 @@
 #SBATCH --gpus=4
 #SBATCH --mem=64gb
 #SBATCH --time=3-00:00:00
-##SBATCH --exclude=c0903a-s25
 
 # module load cuda
 set -e
@@ -50,13 +49,15 @@ fi
 
 repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
-branch="sanity-detect_attack-v2" # sanity-detect_attack-v2 embed_vocab_size
+branch="diff_embed_dim" # sanity-detect_attack-v2 diff_embed_dim
 
 watermark_model_name="Qwen/Qwen2.5-7B-Instruct"  # Qwen/Qwen2.5-7B-Instruct meta-llama/Llama-3.1-8B-Instruct
+embed_output_dim=1024  # 384, 1024, 10240, 40960
+embed_map_model_name="/blue/buyuheng/li_an.ucsb/projects/contrastive-watermark/contrastive_train/result/diff_output_dim/${embed_output_dim}/64batch_15epochs/llama8gpt8-sent1-latter_sent1-hate1/loss_margin0.9"
 is_sanity_check=false 
 seed=666
 
-max_step=500
+max_step=1000
 batch_size=16  # 64
 num_minibatches=2
 G=8  # 8
@@ -78,7 +79,7 @@ spoof_steps=6
 detect_score_coefs_ori=1
 ori_score_strategy="smooth_gap"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
-ori_growth_rate=50
+ori_growth_rate=100
 ori_growth_rate2=250
 detect_score_coefs_wm=1
 wm_score_strategy="raw"
@@ -95,7 +96,7 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+run_id="embed${embed_output_dim}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
 watermark_model_name_lower=$(echo "$watermark_model_name" | tr '[:upper:]' '[:lower:]')
 if [[ "$watermark_model_name_lower" == *"llama"* ]]; then
   model_name="llama"
@@ -157,6 +158,8 @@ cp /blue/buyuheng/li_an.ucsb/projects/rl-watermark/api.py $clone_dir/api.py
 CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --seed $seed \
   --watermark_model_name $watermark_model_name \
+  --embed_map_model_name $embed_map_model_name \
+  --embed_output_dim $embed_output_dim \
   --max_step $max_step \
   --batch_size $batch_size \
   --num_minibatches $num_minibatches \
