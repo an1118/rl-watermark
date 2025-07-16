@@ -560,6 +560,7 @@ class Actor(nn.Module):
         detect_senti_filled = [fill_na(s) for s in detect_senti]
         
         ## compute perplexity if needed
+        import pdb; pdb.set_trace()  
         if ppl_coef > 0.0:
             ppl = self.compute_ppl([t[0] for g in batch['watermarked_tuples'] for t in g])
             ppl = regroup_list(ppl, B, G)
@@ -829,6 +830,7 @@ if __name__ == "__main__":
             # import pdb; pdb.set_trace()  # check all_watermarked_tuples shape
             
             ## compute rewards
+            import pdb; pdb.set_trace()  
             result_dict = actor.compute_rewards(
                 batch,
                 args.binary,
@@ -844,6 +846,7 @@ if __name__ == "__main__":
                 para_growth_rate=args.para_growth_rate,
                 ppl_coef=args.ppl_coef,
             )
+            import pdb; pdb.set_trace()  # print result_dict['ppl']
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
             zero_rewards_group = torch.sum(torch.all(batch['rewards'] == 0, dim=1)).item()
@@ -871,6 +874,7 @@ if __name__ == "__main__":
                     save_checkpoint(actor, args.checkpoint_dir, "best-reward", best_mean_reward, global_step)
 
             ## record detailed rewards
+            import pdb; pdb.set_trace()  
             print_and_log(
                 global_step,
                 current_mean_rewards,
