@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
+from math import exp
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -115,6 +116,8 @@ class Args:
     """the coefficient of the latter sentiment attacked text's detection score in the reward calculation"""
     detect_score_coefs_hate: float = 1.0
     """the coefficient of the hate attacked text's detection score in the reward calculation"""
+    ppl_coef: float = 0.0
+    """the coefficient of the perplexity in the reward calculation, if > 0, will compute perplexity"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -208,6 +211,7 @@ class Actor(nn.Module):
         vocabulary_size = self.watermark_model.config.vocab_size
         self.mapping_list = vocabulary_mapping(vocabulary_size, 384, seed=66)
 
+        self.attack_model_name = attack_model_name
         self.attack_tokenizer = AutoTokenizer.from_pretrained(attack_model_name) if attack_model_name else None
         self.attack_client = OpenAI(api_key="EMPTY", base_url=attack_model_url) if attack_model_url else None
 
@@ -460,6 +464,24 @@ class Actor(nn.Module):
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
         return scores
 
+    def compute_ppl(self, texts):
+        ppl_results = []
+        outputs = self.attack_client.completions.create(
+            model=self.attack_model_name,
+            prompt=texts,
+            max_tokens=0,
+            logprobs=1,
+            echo=True
+        )
+
+        for output in outputs.choices:
+            logprobs = output.logprobs.token_logprobs
+            logprobs = [lp for lp in logprobs if lp is not None]
+            avg_logprob = sum(logprobs) / len(logprobs)
+            ppl = exp(-avg_logprob)
+            ppl_results.append(ppl)
+        return ppl_results
+
     def compute_rewards(
         self, 
         batch, 
@@ -475,6 +497,7 @@ class Actor(nn.Module):
         wm_growth_rate=None,
         para_score_strategy='raw',
         para_growth_rate=None,
+        ppl_coef=0.0,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -535,6 +558,11 @@ class Actor(nn.Module):
         ## fill in the None values
         detect_para_filled = [fill_na(s) for s in detect_para]
         detect_senti_filled = [fill_na(s) for s in detect_senti]
+        
+        ## compute perplexity if needed
+        if ppl_coef > 0.0:
+            ppl = self.compute_ppl([t[0] for g in batch['watermarked_tuples'] for t in g])
+            ppl = regroup_list(ppl, B, G)
 
         ## gather the detectability scores
         threshold_wm = 0.15  # TODO
@@ -555,12 +583,11 @@ class Actor(nn.Module):
 
         detect_overall, rewards = [], []
         for b_idx, d_ori in enumerate(detect_ori):
-            for d_wm, d_para, d_senti, d_hate in zip(
-                detect_wm[b_idx], 
-                detect_para_filled[b_idx], 
-                detect_senti_filled[b_idx], 
-                detect_hate[b_idx]
-            ):
+            assert len(detect_wm[b_idx]) == len(detect_para_filled[b_idx]) == len(detect_senti_filled[b_idx]) == len(detect_hate[b_idx]), \
+                f"Batch {b_idx}: detect_wm, detect_para_filled, detect_senti_filled, detect_hate lengths do not match. " \
+                f"{len(detect_wm[b_idx])}, {len(detect_para_filled[b_idx])}, {len(detect_senti_filled[b_idx])}, {len(detect_hate[b_idx])}"
+            for r_idx in range(len(detect_wm[b_idx])):
+                d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][r_idx], detect_para_filled[b_idx][r_idx], detect_senti_filled[b_idx][r_idx], detect_hate[b_idx][r_idx]
                 if binary:
                     r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
                     r_para = reward_should_detect(d_para, d_ori, threshold_para)
@@ -577,6 +604,8 @@ class Actor(nn.Module):
                     )
                         # detect_score_coefs['latter'] * r_senti_latter +
                     # import pdb; pdb.set_trace()  # check if reward values calculated correctly
+                    if ppl_coef > 0.0:
+                        reward += ppl_coef * ppl[b_idx][r_idx]
                     rewards.append(reward)
                     tmp = r_wm + r_para + r_senti + r_hate
                     detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
@@ -622,6 +651,8 @@ class Actor(nn.Module):
             'sucess_para': len([t for t in attack_para_texts if t is not None]) / len(attack_para_texts),
             'sucess_senti': len([t for t in attack_senti_texts if t is not None]) / len(attack_senti_texts),
         }
+        if ppl_coef > 0.0:
+            result_dict['ppl'] = torch.tensor(ppl).flatten()
 
         return result_dict
 
@@ -673,6 +704,9 @@ if __name__ == "__main__":
                 f"wm({args.wm_score_strategy})"
                 f"para({args.para_score_strategy})"
             )
+
+        if args.ppl_coef > 0.0:
+            args.run_name += f"-ppl{args.ppl_coef}"
 
         if args.is_sanity_check:
             args.run_name = f"sanity_check-{args.run_name}"
@@ -808,6 +842,7 @@ if __name__ == "__main__":
                 wm_growth_rate=args.wm_growth_rate,
                 para_score_strategy=args.para_score_strategy,
                 para_growth_rate=args.para_growth_rate,
+                ppl_coef=args.ppl_coef,
             )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
@@ -850,6 +885,7 @@ if __name__ == "__main__":
                 all_success_senti=result_dict['sucess_senti'],
                 zero_rewards_group=zero_rewards_group,
                 one_rewards_group=one_rewards_group,
+                ppl=result_dict.get('ppl', None),
             )
 
             ## normalize rewards to get advantages
@@ -920,6 +956,7 @@ if __name__ == "__main__":
                         wm_growth_rate=args.wm_growth_rate,
                         para_score_strategy=args.para_score_strategy,
                         para_growth_rate=args.para_growth_rate,
+                        ppl_coef=args.ppl_coef,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
@@ -1052,7 +1089,7 @@ if __name__ == "__main__":
                         valid_batch['watermarked_tuples'].append(valid_watermarked_tuples)
                         # import pdb; pdb.set_trace()  # check if valid_watermarked_tuples shape: [(wm_text, wm_text_ids, logprobs)]
                     # attack
-                    result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs)
+                    result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs, ppl_coef=args.ppl_coef)
                     valid_batch = result_dict['batch']
                     # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
                     # Log the median of each score to wandb
@@ -1068,6 +1105,10 @@ if __name__ == "__main__":
                         "eval/median_senti_score": safe_median(result_dict['detect_senti']),
                         "eval/median_hate_score": safe_median(result_dict['detect_hate']),
                     }, step=global_step)
+                    if 'ppl' in result_dict:
+                        wandb.log({
+                            "eval/median_ppl": safe_median(result_dict['ppl']),
+                        }, step=global_step)
                     # Compute and log green token ratios
                     green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
                     wandb.log({

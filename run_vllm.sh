@@ -89,6 +89,7 @@ para_growth_rate=0.2
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
+ppl_coef=1
 
 do_eval=true
 eval_steps=20  # 20
@@ -110,6 +111,9 @@ if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
   run_id="${run_id}-ct_${curriculum}_d${detect_steps}s${spoof_steps}_ori(${ori_score_strategy})wm(${wm_score_strategy})para(${para_score_strategy})"
+fi
+if (( $(echo "$ppl_coef > 0.0" | bc -l) )); then
+  run_id="${run_id}-ppl${ppl_coef}"
 fi
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"
