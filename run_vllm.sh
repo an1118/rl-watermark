@@ -58,7 +58,7 @@ is_sanity_check=false
 seed=666
 
 max_step=1000
-batch_size=16  # 64
+batch_size=16
 num_minibatches=2
 G=8  # 8
 clip_coef=0.2
@@ -90,6 +90,7 @@ para_growth_rate=0.2
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
+ppl_coef=1
 
 do_eval=true
 eval_steps=20  # 20
@@ -97,13 +98,9 @@ eval_batch_size=100  # 100
 
 
 run_id="embed${embed_output_dim}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
-watermark_model_name_lower=$(echo "$watermark_model_name" | tr '[:upper:]' '[:lower:]')
-if [[ "$watermark_model_name_lower" == *"llama"* ]]; then
-  model_name="llama"
-elif [[ "$watermark_model_name_lower" == *"qwen"* ]]; then
-  model_name="qwen"
-else
-  echo "Unsupported watermark model name. Please add another model name to the if-else statement." >&2
+model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
+if [ -z "$model_name" ]; then
+  echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
   exit 1
 fi
 run_id="${model_name}-${run_id}"
@@ -111,6 +108,9 @@ if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
   run_id="${run_id}-ct_${curriculum}_d${detect_steps}s${spoof_steps}_ori(${ori_score_strategy})wm(${wm_score_strategy})para(${para_score_strategy})"
+fi
+if (( $(echo "$ppl_coef > 0.0" | bc -l) )); then
+  run_id="${run_id}-ppl${ppl_coef}"
 fi
 if [ "$is_sanity_check" = true ]; then
     run_id="sanity_check-${run_id}"
@@ -187,6 +187,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --para_growth_rate $para_growth_rate \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \
+  --ppl_coef $ppl_coef \
   --eval_steps $eval_steps \
   --eval_batch_size $eval_batch_size \
   --attack_model_name "Qwen/Qwen3-14B" \

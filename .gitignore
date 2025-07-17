@@ -144,3 +144,4 @@ watermark_end2end.py
 watermark_util.py
 watermarking.py
 watermark_attack.py
+watermarking_green_ratios.py

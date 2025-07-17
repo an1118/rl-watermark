@@ -160,6 +160,7 @@ def print_and_log(
     all_success_senti=None,
     zero_rewards_group=None,
     one_rewards_group=None,
+    ppl=None
 ):
     print(
         f"Step: {global_step}, "
@@ -188,6 +189,8 @@ def print_and_log(
         "train/zero_rewards_group": zero_rewards_group,
         "train/one_rewards_group": one_rewards_group,
     }, step=global_step)
+    if ppl is not None:
+        wandb.log({"train/reward/perplexity": torch.mean(ppl).item()}, step=global_step)
 
 
 def create_reference_model(model):
