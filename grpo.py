@@ -466,8 +466,10 @@ class Actor(nn.Module):
 
     def compute_ppl(self, texts):
         ppl_results = []
+        models = self.attack_client.models.list()
+        model = models.data[0].id
         outputs = self.attack_client.completions.create(
-            model=self.attack_model_name,
+            model=model,
             prompt=texts,
             max_tokens=0,
             logprobs=1,

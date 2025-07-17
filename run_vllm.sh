@@ -97,13 +97,9 @@ eval_batch_size=100  # 100
 
 
 run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
-watermark_model_name_lower=$(echo "$watermark_model_name" | tr '[:upper:]' '[:lower:]')
-if [[ "$watermark_model_name_lower" == *"llama"* ]]; then
-  model_name="llama"
-elif [[ "$watermark_model_name_lower" == *"qwen"* ]]; then
-  model_name="qwen"
-else
-  echo "Unsupported watermark model name. Please add another model name to the if-else statement." >&2
+model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
+if [ -z "$model_name" ]; then
+  echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
   exit 1
 fi
 run_id="${model_name}-${run_id}"
@@ -188,6 +184,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --para_growth_rate $para_growth_rate \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \
+  --ppl_coef $ppl_coef \
   --eval_steps $eval_steps \
   --eval_batch_size $eval_batch_size \
   --attack_model_name "Qwen/Qwen3-14B" \
