@@ -52,7 +52,7 @@ repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
 branch="sanity-detect_attack-v2" # sanity-detect_attack-v2 embed_vocab_size
 
-watermark_model_name="Qwen/Qwen3-8B"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
+watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
 is_sanity_check=false 
 seed=666
 
