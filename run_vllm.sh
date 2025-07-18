@@ -51,8 +51,8 @@ repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
 branch="diff_embed_dim" # sanity-detect_attack-v2 diff_embed_dim
 
-watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen2.5-7B-Instruct meta-llama/Llama-3.1-8B-Instruct
-embed_output_dim=40960  # 384, 1024, 10240, 40960
+watermark_model_name="Qwen/Qwen2.5-7B-Instruct"  # Qwen/Qwen2.5-7B-Instruct meta-llama/Llama-3.1-8B-Instruct
+embed_output_dim=1024  # 384, 1024, 10240, 40960
 embed_map_model_name="/blue/buyuheng/li_an.ucsb/projects/contrastive-watermark/contrastive_train/result/diff_output_dim/${embed_output_dim}/64batch_15epochs/llama8gpt8-sent1-latter_sent1-hate1/loss_margin0.9"
 is_sanity_check=false 
 seed=666

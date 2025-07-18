@@ -190,7 +190,7 @@ def print_and_log(
         "train/one_rewards_group": one_rewards_group,
     }, step=global_step)
     if ppl is not None:
-        wandb.log({"train/reward/perplexity": torch.mean(ppl).item()}, step=global_step)
+        wandb.log({"train/reward/ppl": torch.mean(ppl).item()}, step=global_step)
 
 
 def create_reference_model(model):
