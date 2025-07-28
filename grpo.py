@@ -966,25 +966,15 @@ if __name__ == "__main__":
 
                 if args.add_gr_loss:
                     # calculate gr splits
-                    mb_original_text_ids = actor.embed_map_tokenizer(
-                        mb_original_text,
-                        return_tensors='pt',
-                        truncation=True,  # Truncate input to the model's max length
-                        max_length=512,    # Ensure the max length is 512 for RoBERTa
-                        padding=True,
-                    ).to(actor.embed_map_model.device)
-                    # import pdb; pdb.set_trace()  # check mb_original_text_ids shape, should be [mb_size, seq_len]
-                    with torch.no_grad():
-                        outputs = actor.embed_map_model(**mb_original_text_ids, return_dict=True, sent_emb=True)
-                        gr_splits = outputs.pooler_output
-                    # import pdb; pdb.set_trace()  # check outputs shape, should be [mb_size, hidden_size]
-                    gr_splits = sign_ste(gr_splits)
-                    # import pdb; pdb.set_trace()  # check outputs value
+                    gr_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)
+                    gr_splits = [(g * 2 - 1) for g in gr_splits]  # convert to [-1, 1] range
                     # Calculate loss for uniform perturbation and unbiased token preference
                     def sign_loss(x):
-                        row = torch.abs(torch.mean(torch.mean(x, dim=0)))
-                        col = torch.abs(torch.mean(torch.mean(x, dim=1)))
-                        return (row + col)/2
+                        # Mean over rows (dim=0), then take absolute and mean
+                        row = torch.mean(torch.abs(torch.mean(x, dim=0)))
+                        # Mean over columns (dim=1), then take absolute and mean
+                        col = torch.mean(torch.abs(torch.mean(x, dim=1)))
+                        return (row + col) / 2
                     loss_gr = sign_loss(gr_splits)
 
                 ### compute loss

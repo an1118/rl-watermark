@@ -145,3 +145,5 @@ watermark_util.py
 watermarking.py
 watermark_attack.py
 watermarking_green_ratios.py
+watermarking_detect_only.py
+debug

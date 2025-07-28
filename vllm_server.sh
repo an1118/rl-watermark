@@ -7,9 +7,8 @@
 
 
 vllm serve "meta-llama/Llama-3.1-70B" \
-  --tensor-parallel-size 2 \
+  --tensor-parallel-size 1 \
   --dtype bfloat16 \
-  --max-model-len 1000 \
-  --max-num-seqs 32 \
+  --max-model-len 600 \
+  --max-num-seqs 16 \
   --port 6666
-
