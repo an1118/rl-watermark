@@ -965,18 +965,31 @@ if __name__ == "__main__":
                     del result_dict  # free memory
 
                 if args.add_gr_loss:
+                    # TODO: compute this loss on all texts (ori, wm, para, senti, hate) in the minibatch
+                    # gather all data
+                    mb_all_texts = {'original': mb_original_text,
+                                    'watermarked': [t[0] for g in mb_watermarked_tuples for t in g],  # [mb_size * G]
+                                    'para': mb_attack_texts['para'],
+                                    'senti': mb_attack_texts['senti'],
+                                    'hate': mb_attack_texts['hate']}
                     # calculate gr splits
-                    gr_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)
-                    gr_splits = [(g * 2 - 1) for g in gr_splits]  # convert to [-1, 1] range
-                    # Calculate loss for uniform perturbation and unbiased token preference
                     def sign_loss(x):
                         # Mean over rows (dim=0), then take absolute and mean
                         row = torch.mean(torch.abs(torch.mean(x, dim=0)))
                         # Mean over columns (dim=1), then take absolute and mean
                         col = torch.mean(torch.abs(torch.mean(x, dim=1)))
                         return (row + col) / 2
-                    loss_gr = sign_loss(gr_splits)
-
+                    loss_gr = 0
+                    for key, value in mb_all_texts.items():
+                        gr_splits = actor._get_green_red_split(actor.embed_map_model, value)
+                        gr_splits = torch.stack(gr_splits, dim=0)
+                        gr_splits = gr_splits * 2 - 1  # convert to [-1, 1] range
+                        # Calculate loss for uniform perturbation and unbiased token preference
+                        current_loss_gr = sign_loss(gr_splits)
+                        loss_gr += current_loss_gr
+                        wandb.log({f"train/gr_loss_{key}": current_loss_gr.item()}, step=global_step)
+                        del gr_splits, current_loss_gr
+                        
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch

@@ -69,14 +69,14 @@ warmup_steps=0
 
 binary=false  # if true, how to add second gradient
 use_soft_split=false
-use_median_split=false
+use_median_split=true
 add_reward_gradient=true
 add_gr_loss=false
 curriculum="none"
 detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="smooth_gap"  # [raw, abs, dynamic, gap, smooth_gap]
+ori_score_strategy="raw"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
 ori_growth_rate=50
 ori_growth_rate2=250
