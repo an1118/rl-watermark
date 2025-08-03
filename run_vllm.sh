@@ -13,6 +13,10 @@
 # module load cuda
 set -e
 
+echo "=== GPU Status at Job Start ==="
+nvidia-smi
+echo "==============================="
+
 vllm_log_file="outputs/${SLURM_JOB_ID}.vllm"
 
 VLLM_PORT=$((SLURM_JOB_ID % 65535))
@@ -72,11 +76,12 @@ use_soft_split=false
 use_median_split=true
 add_reward_gradient=true
 add_gr_loss=false
+add_similarity_loss=true
 curriculum="none"
 detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="raw"  # [raw, abs, dynamic, gap, smooth_gap]
+ori_score_strategy="abs"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
 ori_growth_rate=50
 ori_growth_rate2=250
@@ -89,7 +94,7 @@ para_growth_rate=0.2
 detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
-ppl_coef=1
+ppl_coef=0
 
 do_eval=true
 eval_steps=20  # 20
@@ -128,6 +133,9 @@ if [ "$add_reward_gradient" = true ]; then
 fi
 if [ "$add_gr_loss" = true ]; then
     run_id="${run_id}-gr_loss"
+fi
+if [ "$add_similarity_loss" = true ]; then
+    run_id="${run_id}-sim_loss"
 fi
 if [ "$ori_score_strategy" = "abs" ]; then
   run_id=$(echo "$run_id" | sed -E "s/(ori[0-9]*)\(${ori_score_strategy}\)/\1(${ori_score_strategy}-${target_ori_score})/")
@@ -196,5 +204,6 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   $( [ "$use_median_split" = true ] && echo "--use_median_split" ) \
   $( [ "$add_reward_gradient" = true ] && echo "--add_reward_gradient" ) \
   $( [ "$add_gr_loss" = true ] && echo "--add_gr_loss" )
+  $( [ "$add_similarity_loss" = true ] && echo "--add_similarity_loss" )
 
 # CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py

@@ -82,6 +82,8 @@ class Args:
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
+    add_similarity_loss: bool = False
+    """if toggled, will added loss for similarity between g/r splits of original and watermarked text"""
     curriculum: str = "none"
     """the curriculum strategy to use, can be one of [v1, v2]"""
     detect_steps: int = 10
@@ -722,6 +724,8 @@ if __name__ == "__main__":
             args.run_name += "-reward_gradient"
         if args.add_gr_loss:
             args.run_name += "-gr_loss"
+        if args.add_similarity_loss:
+            args.run_name += "-sim_loss"
         if args.attack_model_name:
             args.run_name += f"-attack_{args.attack_model_name.split('/')[-1]}"
         if args.ori_score_strategy == 'abs':
@@ -989,7 +993,21 @@ if __name__ == "__main__":
                         loss_gr += current_loss_gr
                         wandb.log({f"train/gr_loss_{key}": current_loss_gr.item()}, step=global_step)
                         del gr_splits, current_loss_gr
-                        
+
+                if args.add_similarity_loss:
+                    import torch.nn.functional as F
+                    # Compute similarity loss between original and watermarked texts
+                    ori_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)  # [mb_size]
+                    ori_green_red_splits = [g.repeat(args.G, 1) for g in ori_green_red_splits]
+                    ori_green_red_splits = torch.cat(ori_green_red_splits, dim=0)  # [mb_size * G, vocab_size]
+                    ori_green_red_splits = 2 * ori_green_red_splits - 1  # convert to [-1, 1] range
+                    mb_watermarked_texts = [t[0] for g in mb_watermarked_tuples for t in g]
+                    wm_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_watermarked_texts)
+                    wm_green_red_splits = torch.stack(wm_green_red_splits, dim=0) 
+                    wm_green_red_splits = 2 * wm_green_red_splits - 1
+                    cos_sim = F.cosine_similarity(ori_green_red_splits, wm_green_red_splits, dim=1)  # shape: [batch_size]
+                    loss_sim = 1 - cos_sim.mean()
+
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
@@ -1063,6 +1081,10 @@ if __name__ == "__main__":
                     loss += loss_gr.to(loss.device)
                     wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
                     del loss_gr  # free memory
+                if args.add_similarity_loss:
+                    loss += loss_sim.to(loss.device)
+                    wandb.log({"train/sim_loss": loss_sim.item()}, step=global_step)
+                    del loss_sim
                 loss /= total_output_len  # average over the total output length
                 # import pdb; pdb.set_trace()  # check device. loss: ; total_loss_pg: ; total_kl: ; total_loss_rg: ; all at tf wm model's gpu
                 wandb.log({"train/loss": loss.item()}, step=global_step)
