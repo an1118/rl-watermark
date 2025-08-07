@@ -7,7 +7,7 @@
 ##SBATCH --reservation=buyuheng 
 #SBATCH --gpus=4
 #SBATCH --mem=64gb
-#SBATCH --time=3-00:00:00
+#SBATCH --time=1-00:00:00
 ##SBATCH --exclude=c0903a-s25
 
 # module load cuda
@@ -19,7 +19,7 @@ echo "==============================="
 
 vllm_log_file="outputs/${SLURM_JOB_ID}.vllm"
 
-VLLM_PORT=$((SLURM_JOB_ID % 65535))
+VLLM_PORT=$((1024 + SLURM_JOB_ID % (65535 - 1024)))
 CUDA_VISIBLE_DEVICES=0 vllm serve "/blue/buyuheng/li_an.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-14B/snapshots/8268fe3026cb304910457689366670e803a6fd56" \
   --tensor-parallel-size 1 \
   --dtype bfloat16 \
@@ -204,7 +204,8 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   $( [ "$use_soft_split" = true ] && echo "--use_soft_split" ) \
   $( [ "$use_median_split" = true ] && echo "--use_median_split" ) \
   $( [ "$add_reward_gradient" = true ] && echo "--add_reward_gradient" ) \
-  $( [ "$add_gr_loss" = true ] && echo "--add_gr_loss" )
-  $( [ "$add_similarity_loss" = true ] && echo "--add_similarity_loss" )
+  $( [ "$add_gr_loss" = true ] && echo "--add_gr_loss" ) \
+  $( [ "$add_similarity_loss" = true ] && echo "--add_similarity_loss" ) \
+  $( [ "$log_grad_norm" = true ] && echo "--log_grad_norm" )
 
 # CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py

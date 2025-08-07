@@ -78,7 +78,7 @@ class Args:
     """if toggled, use soft green-red split score"""
     use_median_split: bool = False
     """if toggled, use generated embedding as probabilities for sampling as green tokens"""
-    add_reward_gradient: bool = True
+    add_reward_gradient: bool = False
     """if toggled, will added the second gradient term, which calculates gradient on rewards"""
     add_gr_loss: bool = False
     """if toggled, will added loss for uniform perturbation and unbiased token preference"""
