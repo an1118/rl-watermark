@@ -1049,8 +1049,8 @@ if __name__ == "__main__":
                             del rg_loss  # free memory
                         total_output_len += len(new_logprobs)
                 
-                ### log gradient norm of two losses
-                if args.add_reward_gradient and args.log_grad_norm:
+                ### log gradient norm
+                if args.log_grad_norm:
                     # Compute and log gradient norm for policy gradient loss
                     optimizer.zero_grad()
                     avg_total_loss_pg = total_loss_pg / total_output_len
@@ -1060,14 +1060,15 @@ if __name__ == "__main__":
                     ).item()
                     wandb.log({"train/grad_norm_pg": grad_norm_pg}, step=global_step)
 
-                    # Compute and log gradient norm for reward gradient loss
-                    optimizer.zero_grad()  # clear gradients before backward on rg
-                    avg_total_loss_rg = total_loss_rg / total_output_len
-                    total_loss_rg.backward(retain_graph=True)
-                    grad_norm_rg = torch.norm(
-                        torch.stack([p.grad.norm() for p in actor.embed_map_model.parameters() if p.grad is not None])
-                    ).item()
-                    wandb.log({"train/grad_norm_rg": grad_norm_rg}, step=global_step)
+                    if args.add_reward_gradient:
+                        # Compute and log gradient norm for reward gradient loss
+                        optimizer.zero_grad()  # clear gradients before backward on rg
+                        avg_total_loss_rg = total_loss_rg / total_output_len
+                        total_loss_rg.backward(retain_graph=True)
+                        grad_norm_rg = torch.norm(
+                            torch.stack([p.grad.norm() for p in actor.embed_map_model.parameters() if p.grad is not None])
+                        ).item()
+                        wandb.log({"train/grad_norm_rg": grad_norm_rg}, step=global_step)
 
                 loss = total_loss_pg
                 if args.beta != 0.0:

@@ -59,6 +59,7 @@ branch="sanity-detect_attack-v2" # sanity-detect_attack-v2 embed_vocab_size
 watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
 is_sanity_check=false 
 seed=666
+log_grad_norm=true
 
 max_step=1000
 batch_size=16
@@ -73,15 +74,15 @@ warmup_steps=0
 
 binary=false  # if true, how to add second gradient
 use_soft_split=false
-use_median_split=true
-add_reward_gradient=true
+use_median_split=false
+add_reward_gradient=false
 add_gr_loss=false
-add_similarity_loss=true
+add_similarity_loss=false
 curriculum="none"
 detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="abs"  # [raw, abs, dynamic, gap, smooth_gap]
+ori_score_strategy="smooth_gap"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
 ori_growth_rate=50
 ori_growth_rate2=250
