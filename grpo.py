@@ -189,7 +189,7 @@ class Actor(nn.Module):
         watermark_model_name, 
         attack_model_name, 
         attack_model_url, 
-        config
+        config,
     ):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -788,7 +788,7 @@ if __name__ == "__main__":
         watermark_model_name=args.watermark_model_name,
         attack_model_name=args.attack_model_name,
         attack_model_url=args.attack_model_url,
-        args=args,
+        config=args,
     )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     # Choose learning rate scheduler based on argument

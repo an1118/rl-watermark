@@ -44,6 +44,7 @@ for i in {1..20}; do
     READY=1
     break
   fi
+  echo "Waiting for vLLM server to be ready... (attempt: $i)"
   sleep 30
 done
 
@@ -73,7 +74,7 @@ lr_scheduler_type=constant
 warmup_steps=0
 
 freeze_detector=true
-detector_update_freq=50
+detector_update_freq=-1
 
 binary=false  # if true, how to add second gradient
 use_soft_split=false
