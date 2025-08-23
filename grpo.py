@@ -132,7 +132,7 @@ class Args:
     """the url of the local model used for attacks, only used if `attack_model_name` is not None"""
     freeze_detector: bool = False
     """if toggled, freeze the embed_map_model used for detection"""
-    detector_update_freq: int = None
+    detector_update_freq: int = -1
     """the frequency (in steps) to update the detector when `freeze_detector` is True, if -1, never update"""
 
     # Dataset specific arguments
