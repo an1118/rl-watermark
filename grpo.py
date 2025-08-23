@@ -132,6 +132,8 @@ class Args:
     """the url of the local model used for attacks, only used if `attack_model_name` is not None"""
     freeze_detector: bool = False
     """if toggled, freeze the embed_map_model used for detection"""
+    detector_update_freq: int = None
+    """the frequency (in steps) to update the detector when `freeze_detector` is True, if -1, never update"""
 
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
@@ -786,6 +788,7 @@ if __name__ == "__main__":
         watermark_model_name=args.watermark_model_name,
         attack_model_name=args.attack_model_name,
         attack_model_url=args.attack_model_url,
+        args=args,
     )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     # Choose learning rate scheduler based on argument
@@ -1111,6 +1114,11 @@ if __name__ == "__main__":
                 current_lr = optimizer.param_groups[0]['lr']
                 wandb.log({"train/learning_rate": current_lr}, step=global_step)
 
+                ## Update the detector
+                if args.freeze_detector and args.detector_update_freq > 0 and global_step % args.detector_update_freq == 0:
+                    print("Updating the detector...")
+                    actor.freeze_embed_map_model = create_reference_model(actor.embed_map_model).to(actor.gpu2)
+                
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
                     valid_batch = {'original_text': valid_set}

@@ -7,7 +7,7 @@
 ##SBATCH --reservation=buyuheng 
 #SBATCH --gpus=4
 #SBATCH --mem=64gb
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 ##SBATCH --exclude=c0903a-s25
 
 # module load cuda
@@ -35,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-sleep 180
+sleep 120
 
 READY=0
 for i in {1..20}; do
@@ -73,6 +73,7 @@ lr_scheduler_type=constant
 warmup_steps=0
 
 freeze_detector=true
+detector_update_freq=50
 
 binary=false  # if true, how to add second gradient
 use_soft_split=false
@@ -112,7 +113,10 @@ if [ -z "$model_name" ]; then
 fi
 run_id="${model_name}-${run_id}"
 if [ "$freeze_detector" = true ]; then
-    run_id="${run_id}-freeze"
+    run_id="${run_id}-freeze_detector"
+    if [ "$detector_update_freq" -gt 0 ]; then
+        run_id="${run_id}-update_freq${detector_update_freq}"
+    fi
 fi
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
@@ -204,6 +208,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --attack_model_name "Qwen/Qwen3-14B" \
   --attack_model_url "http://localhost:${VLLM_PORT}/v1" \
   $( [ "$freeze_detector" = true ] && echo "--freeze_detector" ) \
+  $( [ "$detector_update_freq" -gt 0 ] && echo "--detector_update_freq $detector_update_freq" ) \
   $( [ "$is_sanity_check" = true ] && echo "--is_sanity_check" ) \
   $( [ "$do_eval" = true ] && echo "--do_eval" ) \
   $( [ "$binary" = true ] && echo "--binary" ) \
