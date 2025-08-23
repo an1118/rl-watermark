@@ -130,6 +130,8 @@ class Args:
     """the name of the local model used for attacks, if None, will use 4o-mini api calls"""
     attack_model_url: str = "http://localhost:8000/v1"
     """the url of the local model used for attacks, only used if `attack_model_name` is not None"""
+    freeze_detector: bool = False
+    """if toggled, freeze the embed_map_model used for detection"""
 
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
@@ -162,6 +164,8 @@ class Args:
         if self.curriculum.lower() != "none":
             if self.detect_steps % self.num_minibatches != 0 or self.spoof_steps % self.num_minibatches != 0:
                 raise ValueError("detect_steps and spoof_steps must be a multiple of num_minibatches.")
+        if self.freeze_detector and self.add_reward_gradient:
+            raise ValueError("freeze_detector and add_reward_gradient cannot both be True.")
 
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -183,14 +187,14 @@ class Actor(nn.Module):
         watermark_model_name, 
         attack_model_name, 
         attack_model_url, 
-        use_soft_split, 
-        use_median_split
+        config
     ):
         super().__init__()
         # cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         self.gpu0 = torch.device(f"cuda:0")  # for wm model - vllm
         self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer + reference model
         self.gpu2 = torch.device(f"cuda:2")  # for embed model
+        self.config = config
 
         self.watermark_model_vllm = LLM(
             model=watermark_model_name, 
@@ -201,6 +205,8 @@ class Actor(nn.Module):
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
         self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
         self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
+        if self.config.freeze_detector:
+            self.freeze_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
         for param in self.embed_map_model.parameters():
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
@@ -217,8 +223,6 @@ class Actor(nn.Module):
         self.attack_tokenizer = AutoTokenizer.from_pretrained(attack_model_name) if attack_model_name else None
         self.attack_client = OpenAI(api_key="EMPTY", base_url=attack_model_url) if attack_model_url else None
 
-        self.use_soft_split = use_soft_split  # use soft green-red split score or not
-        self.use_median_split = use_median_split  # use generated embedding as probabilities for sampling as green tokens
         self.delta = 0.13  # watermark strength
         self.alpha = 1.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
@@ -322,9 +326,9 @@ class Actor(nn.Module):
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
         # import pdb; pdb.set_trace()  # check mapping shape: [B, 384]
-        if self.use_soft_split:
+        if self.config.use_soft_split:
             mappings = torch.sigmoid(mappings)
-        elif self.use_median_split:
+        elif self.config.use_median_split:
             thresholds = torch.median(mappings, dim=1).values  # [B]
             mappings = step_ste(mappings, thresholds)
             # import pdb; pdb.set_trace()  # count the number of 1s and 0s in mapping
@@ -379,7 +383,11 @@ class Actor(nn.Module):
         else:
             raise ValueError("texts should be a list of strings or a single string.")
         
-        green_red_splits = self._get_green_red_split(self.embed_map_model, texts)
+        if self.config.freeze_detector:
+            embed_map_model = self.freeze_embed_map_model
+        else:
+            embed_map_model = self.embed_map_model
+        green_red_splits = self._get_green_red_split(embed_map_model, texts)
         if not has_gradient:
             green_red_splits = [g.detach() for g in green_red_splits]
 
@@ -778,8 +786,6 @@ if __name__ == "__main__":
         watermark_model_name=args.watermark_model_name,
         attack_model_name=args.attack_model_name,
         attack_model_url=args.attack_model_url,
-        use_soft_split=args.use_soft_split,
-        use_median_split=args.use_median_split,
     )
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     # Choose learning rate scheduler based on argument

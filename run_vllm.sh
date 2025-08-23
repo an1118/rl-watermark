@@ -72,6 +72,8 @@ learning_rate=1e-5
 lr_scheduler_type=constant
 warmup_steps=0
 
+freeze_detector=true
+
 binary=false  # if true, how to add second gradient
 use_soft_split=false
 use_median_split=false
@@ -102,13 +104,16 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="batch$batch_size-nmini$num_minibatches-G$G-clip$clip_coef-beta$beta-lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+run_id="lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
   exit 1
 fi
 run_id="${model_name}-${run_id}"
+if [ "$freeze_detector" = true ]; then
+    run_id="${run_id}-freeze"
+fi
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
 else
@@ -198,6 +203,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --eval_batch_size $eval_batch_size \
   --attack_model_name "Qwen/Qwen3-14B" \
   --attack_model_url "http://localhost:${VLLM_PORT}/v1" \
+  $( [ "$freeze_detector" = true ] && echo "--freeze_detector" ) \
   $( [ "$is_sanity_check" = true ] && echo "--is_sanity_check" ) \
   $( [ "$do_eval" = true ] && echo "--do_eval" ) \
   $( [ "$binary" = true ] && echo "--binary" ) \
