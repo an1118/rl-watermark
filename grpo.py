@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import tyro
 from math import exp
+from collections import defaultdict
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -23,7 +24,8 @@ from util import (
     vocabulary_mapping, WatermarkLogitsBias, selective_log_softmax, 
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
-    regroup_list, curriculum_learning_schedule, coef_strategy
+    regroup_list, curriculum_learning_schedule, coef_strategy, 
+    str_to_torch_dtype
 )
 from text_quality_score import _judge_text_quality
 
@@ -43,17 +45,19 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
+    dtype: str = "bfloat16"
+    """the data type"""
 
     # GRPO training arguments
     num_iterations: int = 1
     """the number of iterations (computed in runtime)"""
     max_step: int = 500
     """the total number of steps to train the model"""
-    batch_size: int = 16  # 16
+    batch_size: int = 8  # 16
     """the batch size"""
     num_minibatches: int = 2  # 2
     """the number of mini-batches"""
-    G: int = 8  # 8
+    G: int = 2  # 8
     """the number of rollouts generated for each original text"""
     lr_scheduler_type: str = "constant"
     """the type of learning rate scheduler, can be one of [linear, constant]"""
@@ -92,7 +96,7 @@ class Args:
     """the number of steps for the spoofing phase in curriculum learning"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
-    ori_score_strategy: str = "dynamic"
+    ori_score_strategy: str = "abs"
     """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
@@ -102,13 +106,13 @@ class Args:
     """the growth rate of the original text's detection score, used when 'ori_score_strategy' is 'smooth_gap'"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
-    wm_score_strategy: str = "dynamic"
+    wm_score_strategy: str = "raw"
     """the strategy to compute the watermarked text's score, can be one of [raw, dynamic]"""
     wm_growth_rate: float = 1.0
     """the growth rate of the watermarked text's detection score, used to calculate the reward"""
     detect_score_coefs_para: float = 1.0
     """the coefficient of the paraphrased text's detection score in the reward calculation"""
-    para_score_strategy: str = "dynamic"
+    para_score_strategy: str = "raw"
     """the strategy to compute the paraphrased text's score, can be one of [raw, dynamic]"""
     para_growth_rate: float = 1.0
     """the growth rate of the paraphrased text's detection score, used to calculate the reward"""
@@ -197,15 +201,17 @@ class Actor(nn.Module):
         self.gpu1 = torch.device(f"cuda:1")  # for wm model - transformer + reference model
         self.gpu2 = torch.device(f"cuda:2")  # for embed model
         self.config = config
+        torch_dtype = str_to_torch_dtype(config.dtype)
 
         self.watermark_model_vllm = LLM(
             model=watermark_model_name, 
             tensor_parallel_size=1,
             max_model_len=2000,
+            dtype=config.dtype,
         )
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
-        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name).to(self.gpu2)
+        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name, torch_dtype=torch_dtype).to(self.gpu2)
         self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
         if self.config.freeze_detector:
             self.freeze_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
@@ -213,8 +219,7 @@ class Actor(nn.Module):
             param.requires_grad = True
         self.watermark_tokenizer = AutoTokenizer.from_pretrained(watermark_model_name)
         self.watermark_tokenizer.pad_token = self.watermark_tokenizer.eos_token
-        self.watermark_model = AutoModelForCausalLM.from_pretrained(watermark_model_name).to(self.gpu1)
-        # import pdb; pdb.set_trace()  # TODO: use bf16
+        self.watermark_model = AutoModelForCausalLM.from_pretrained(watermark_model_name, torch_dtype=torch_dtype).to(self.gpu1)
         for param in self.watermark_model.parameters():
             param.requires_grad = False  # freeze the watermark model
 
@@ -233,9 +238,36 @@ class Actor(nn.Module):
 
 
     def rollout(self, text, G):
-        # get G/R split
-        green_red_split = self._get_green_red_split(self.embed_map_model, text)[0]
+        # get G/R probability
+        with torch.no_grad():
+            green_red_prob = self._get_green_red_split(self.embed_map_model, text)
 
+        # Sample G binary mappings from green_red_prob
+        green_red_maps = []
+        for _ in range(G):
+            mapping = torch.bernoulli(green_red_prob)
+            green_red_maps.append(mapping)
+        # import pdb; pdb.set_trace()  # check G mappings are different, device: gpu2(embed's device)
+        green_red_maps = torch.cat(green_red_maps, dim=0)  # [G, 384]
+
+        # For each mapping, compute the log probability of getting that mapping given green_red_prob
+        green_red_maps_logps = self.get_logps(green_red_maps, green_red_prob)
+
+        # Generate watermarked texts
+        green_red_splits = [m[self.mapping_list] for m in green_red_maps]
+        watermarked_texts = [self.generate_watermarked_text(text, split) for split in green_red_splits]
+        return green_red_maps, green_red_maps_logps, watermarked_texts
+    
+    def get_logps(self, mappings, green_red_prob):
+        # Compute log-probabilities for all mappings at once
+        log_prob = (
+            mappings * torch.log(green_red_prob + 1e-8) +
+            (1 - mappings) * torch.log(1 - green_red_prob + 1e-8)
+        )
+        mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
+        return mappings_logps
+
+    def generate_watermarked_text(self, text, green_red_split):
         # add prompt instruction
         messages = [
             {
@@ -251,71 +283,14 @@ class Actor(nn.Module):
         # generate watermarked text
         logits_processors = [WatermarkLogitsBias(green_red_split, self.alpha, self.delta)]
         sampling_params = SamplingParams(
-            n=G,
             top_p=0.9,
             max_tokens=500,
-            logprobs=0,  # only return logprobs for the generated tokens
             logits_processors=logits_processors,
         )
         outputs = self.watermark_model_vllm.generate([prompt], sampling_params, use_tqdm=False)
         ## save output results
-        watermarked_tuples = []
-        output_group = outputs[0].outputs
-        for o in output_group:
-            output_text = o.text
-            text_ids = o.token_ids
-            logprobs = torch.tensor([lp[id].logprob for lp, id in zip(o.logprobs, text_ids)])
-            watermarked_tuples.append((output_text, text_ids, logprobs)) 
-
-        # import pdb; pdb.set_trace()  # check generated results. device: cpu
-        return watermarked_tuples
-
-    def get_per_token_logps(self, embed_model, original_text, watermarked_texts_ids):
-        '''
-        Compute the log probabilities of the watermarked text given the original text.
-        '''
-        # get G/R split
-        green_red_split = self._get_green_red_split(embed_model, original_text)[0]
-
-        # concatenate the original text and the watermarked text
-        ## add prompt instruction
-        messages = [
-            {
-                "role": "system", "content": SYS_PROMPT,
-            },
-            {
-                "role": "user",  "content": original_text
-            },
-        ]
-        prompt = self.watermark_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        ## tokenize
-        prompt = self.watermark_tokenizer(prompt, return_tensors='pt').to(self.watermark_model.device)
-
-        all_logprobs = []
-        for wm_text_ids in watermarked_texts_ids:
-            # import pdb; pdb.set_trace()  # check line by line, check variables dimensions
-            watermarked = torch.tensor(wm_text_ids).unsqueeze(0).to(self.watermark_model.device)
-            watermarked_attention_mask = torch.ones(watermarked.size()).to(self.watermark_model.device)
-            ## concatenate
-            input_ids = torch.cat((prompt['input_ids'], watermarked), dim=1)
-            attention_mask = torch.cat((prompt['attention_mask'],watermarked_attention_mask), dim=1)
-            logits_to_keep = watermarked.size(1)  # only need to compute the logits for the watermarked tokens
-
-            per_token_logps = self._get_per_token_logps(self.watermark_model, green_red_split, input_ids, attention_mask, logits_to_keep)
-            per_token_logps = per_token_logps.squeeze(0)
-            all_logprobs.append(per_token_logps)
-            del watermarked, watermarked_attention_mask, input_ids, attention_mask, per_token_logps
-        return all_logprobs
-
-    def _get_per_token_logps(self, model, green_red_split, input_ids, attention_mask, logits_to_keep):
-        # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
-        # add waterark logits bias
-        logits = watermark_logits_bias(logits, green_red_split, self.delta, self.alpha, self.measure_threshold)
-        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-        input_ids = input_ids[:, -logits_to_keep:]
-        logits = logits[:, -logits_to_keep:]
-        return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
+        watermarked_text = outputs[0].outputs[0].text
+        return watermarked_text
 
     def _get_green_red_split(self, model, texts):
         input_ids = self.embed_map_tokenizer(
@@ -327,22 +302,13 @@ class Actor(nn.Module):
         ).to(model.device)
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
-        # import pdb; pdb.set_trace()  # check mapping shape: [B, 384]
-        if self.config.use_soft_split:
-            mappings = torch.sigmoid(mappings)
-        elif self.config.use_median_split:
-            thresholds = torch.median(mappings, dim=1).values  # [B]
-            mappings = step_ste(mappings, thresholds)
-            # import pdb; pdb.set_trace()  # count the number of 1s and 0s in mapping
-            # num_close_to_one = torch.sum((mapping > 0.99999) & (mapping <= 1.0)).item()
-            # num_close_to_zero = torch.sum((mapping >= 0.00001) & (mapping < 0.01)).item()
-        else:
-            # by default, use 0 as the threshold to divide the g/r tokens
-            mappings = sign_ste(mappings)
-            mappings = (mappings + 1) / 2
-        mappings = [m for m in mappings]
-        green_red_splits = [m[self.mapping_list].clone().to(self.watermark_model.device) for m in mappings]
-        return green_red_splits
+        # Normalize each row to [0, 1] while preserving ratios
+        min_vals = mappings.min(dim=1, keepdim=True)[0]
+        max_vals = mappings.max(dim=1, keepdim=True)[0]
+        mappings = (mappings - min_vals) / (max_vals - min_vals + 1e-8)
+        mappings = mappings.to(self.watermark_model.device)
+        # import pdb; pdb.set_trace()  # check mapping shape: [B, 384], should have gradient
+        return mappings
 
     def _next_token_entropy(self, logits):
         """
@@ -369,8 +335,9 @@ class Actor(nn.Module):
         Returns:
             list: List of green token ratios for each text.
         """
-        green_red_splits = self._get_green_red_split(self.embed_map_model, texts)
-        green_red_splits = [g.detach() for g in green_red_splits]
+        green_red_probs = self._get_green_red_split(self.embed_map_model, texts)
+        green_red_maps = torch.bernoulli(green_red_probs)
+        green_red_splits = [m[self.mapping_list] for m in green_red_maps]
         ratios = [(torch.sum(green_red_split) / len(green_red_split)).item() for green_red_split in green_red_splits]
         return ratios
     
@@ -389,9 +356,10 @@ class Actor(nn.Module):
             embed_map_model = self.freeze_embed_map_model
         else:
             embed_map_model = self.embed_map_model
-        green_red_splits = self._get_green_red_split(embed_map_model, texts)
+        green_red_probs = self._get_green_red_split(embed_map_model, texts)
         if not has_gradient:
-            green_red_splits = [g.detach() for g in green_red_splits]
+            green_red_probs = [g.detach() for g in green_red_probs]
+        if has_gradient: import pdb; pdb.set_trace()  # check gradient
 
         # start_time = time.time()
         # Tokenize the batch
@@ -404,7 +372,7 @@ class Actor(nn.Module):
         # tokenization_time = time.time() - start_time
         # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
 
-        mini_batch_size = 64
+        mini_batch_size = 128
 
         all_entropy = []
         for start in range(0, len(texts), mini_batch_size):
@@ -429,7 +397,6 @@ class Actor(nn.Module):
             # entropy_time = time.time() - start_time
             # print(f"Entropy computation time: {entropy_time:.4f} seconds", flush=True)
             all_entropy.append(entropy.cpu())
-
             del logits, entropy, batch_inputs  # free memory
         # print(f"===========", flush=True)
         all_entropy = torch.cat(all_entropy, dim=0).to(self.watermark_model.device)  # [B, L-1]
@@ -438,7 +405,8 @@ class Actor(nn.Module):
         for start in range(0, len(texts), mini_batch_size):
             end = min(start + mini_batch_size, len(texts))
             batch_inputs = {k: v[start:end].to(self.watermark_model.device) for k, v in inputs.items()}
-            batch_green_red_splits = green_red_splits[start:end]
+            batch_green_red_probs = green_red_probs[start:end]
+            batch_green_red_probs = [m[self.mapping_list] for m in batch_green_red_probs]
             batch_entropy = all_entropy[start:start + mini_batch_size]  # [miniB, L-1]
 
             # start_time = time.time()
@@ -454,10 +422,10 @@ class Actor(nn.Module):
             # print(f"Mask computation time: {mask_time:.4f} seconds", flush=True)
 
             # start_time = time.time()
-            green_red_splits_tensor = torch.stack(batch_green_red_splits)  # [miniB, vocab_size]
+            green_red_probs_tensor = torch.stack(batch_green_red_probs)  # [miniB, vocab_size]
             # Use gather to index: expand input_ids to [miniB, L, 1] for gather
             token_scores = torch.gather(
-                green_red_splits_tensor, 1, batch_inputs['input_ids']
+                green_red_probs_tensor, 1, batch_inputs['input_ids']
             )
             # token_score_time = time.time() - start_time
             # print(f"Token score computation time: {token_score_time:.4f} seconds", flush=True)
@@ -467,12 +435,12 @@ class Actor(nn.Module):
             scores.append(scores_)
             # score_time = time.time() - start_time
             # print(f"Score computation time: {score_time:.4f} seconds", flush=True)
-            del batch_inputs, batch_green_red_splits, batch_entropy  # free memory
+            del batch_inputs, batch_green_red_probs, batch_entropy  # free memory
 
         # print(f"===========", flush=True)
-        del all_entropy, inputs, green_red_splits  # free memory
+        del all_entropy, inputs, green_red_probs  # free memory
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
-        # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
+        if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
         return scores
 
@@ -535,7 +503,7 @@ class Actor(nn.Module):
             attack_hate_texts = attack_texts['hate']
         else:
             # watermarked_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = run_attacks(watermarked_tuples, self.attack_client, self.attack_tokenizer)
-            batch['attack_texts'] = run_attacks(batch['watermarked_tuples'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
+            batch['attack_texts'] = run_attacks(batch['watermarked_texts'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
             attack_para_texts, attack_senti_texts, attack_hate_texts = batch['attack_texts']['para'], batch['attack_texts']['senti'], batch['attack_texts']['hate']
 
         ## detect
@@ -544,7 +512,7 @@ class Actor(nn.Module):
         detect_para, detect_senti, detect_hate = [], [], []
         has_gradient = True if attack_texts else False
         B = len(batch['original_text'])  # batch size
-        G = len(batch['watermarked_tuples'][0])  # rollout size
+        G = len(batch['watermarked_texts'][0])  # rollout size
         
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
@@ -552,7 +520,7 @@ class Actor(nn.Module):
         detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient)
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm = self.detect([t[0] for g in batch['watermarked_tuples'] for t in g], has_gradient=wm_has_gradient)
+        detect_wm = self.detect([t for g in batch['watermarked_texts'] for t in g], has_gradient=wm_has_gradient)
         detect_wm = regroup_list(detect_wm, B, G)
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
@@ -830,18 +798,18 @@ if __name__ == "__main__":
             # prepare curriculum
             detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.detect_steps, args.spoof_steps, detect_score_coefs)
 
-            batch = {'original_text': train_set[iteration : iteration + args.batch_size]}
+            batch = defaultdict(list)
+            batch['original_text'] = train_set[iteration : iteration + args.batch_size]
 
-            # rollout before optimization
-            batch['watermarked_tuples'] = []  # [B, G], each is (wm_text, wm_text_ids, logprobs)
             ## rollout
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
-                with torch.no_grad():
-                    watermarked_tuples = actor.rollout(original_data, args.G)  # device: cpu
-                batch['watermarked_tuples'].append(watermarked_tuples)
-            # import pdb; pdb.set_trace()  # check all_watermarked_tuples shape
+                green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G)  # device: cpu
+                batch['green_red_maps'].append(green_red_maps)
+                batch['green_red_maps_logps'].append(green_red_maps_logps)
+                batch['watermarked_texts'].append(watermarked_texts)
+            # import pdb; pdb.set_trace()  # check shape
             
             ## compute rewards
             result_dict = actor.compute_rewards(
@@ -926,7 +894,9 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 mb_original_text = [batch['original_text'][idx] for idx in mb_inds]  # [mb_size]
-                mb_watermarked_tuples = [batch['watermarked_tuples'][idx] for idx in mb_inds]  # [mb_size, G*(wm_texts, wm_text_ids, logprobs)]
+                mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
+                mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
+                mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G]
                 mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G]}
                 # Flatten each [mb_size, G] list of lists into a single list for each attack type
                 mb_attack_texts = {k: [item for sublist in v for item in sublist] for k, v in mb_attack_texts.items()}  # {attack_name: [mb_size*G]}
@@ -935,15 +905,16 @@ if __name__ == "__main__":
 
                 ### get on policy log probabilities and rewards
                 start_time = time.time()
-                new_mb_logprobs = []  # [mb_size, G, seq_len_i]
-                all_per_token_kl = []  # [mb_size, G, seq_len_i]
-                for original_text, watermarked_tuples in zip(mb_original_text, mb_watermarked_tuples):
-                    new_logprobs = actor.get_per_token_logps(actor.embed_map_model, original_text, [t[1] for t in watermarked_tuples])  # [G, seq_len_i]
-                    # import pdb; pdb.set_trace()  # check if new_logprobs has gradient, device: gpu1(tf wm model)
+                new_mb_logprobs = []  # [mb_size, G, 384]
+                all_per_token_kl = []  # [mb_size, G, 384]
+                for original_text, green_red_maps in zip(mb_original_text, mb_green_red_maps):
+                    green_red_prob = actor._get_green_red_split(actor.embed_map_model, original_text)
+                    new_logprobs = actor.get_logps(green_red_maps, green_red_prob)
                     new_mb_logprobs.append(new_logprobs)
                     if args.beta != 0.0:
                         with torch.no_grad():
-                            ref_logprobs = actor.get_per_token_logps(actor.reference_embed_map_model, original_text, [t[1] for t in watermarked_tuples])
+                            green_red_prob = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
+                            ref_logprobs = actor.get_logps(green_red_maps, green_red_prob)
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
                             all_per_token_kl.append(per_token_kl)
@@ -957,7 +928,7 @@ if __name__ == "__main__":
                     result_dict = actor.compute_rewards(
                         {
                             'original_text': mb_original_text,
-                            'watermarked_tuples': mb_watermarked_tuples
+                            'watermarked_texts': mb_watermarked_texts
                         },
                         args.binary,
                         detect_score_coefs,
@@ -978,51 +949,53 @@ if __name__ == "__main__":
                     del result_dict  # free memory
 
                 if args.add_gr_loss:
-                    # TODO: compute this loss on all texts (ori, wm, para, senti, hate) in the minibatch
-                    # gather all data
-                    mb_all_texts = {'original': mb_original_text,
-                                    'watermarked': [t[0] for g in mb_watermarked_tuples for t in g],  # [mb_size * G]
-                                    'para': mb_attack_texts['para'],
-                                    'senti': mb_attack_texts['senti'],
-                                    'hate': mb_attack_texts['hate']}
-                    # calculate gr splits
-                    def sign_loss(x):
-                        # Mean over rows (dim=0), then take absolute and mean
-                        row = torch.mean(torch.abs(torch.mean(x, dim=0)))
-                        # Mean over columns (dim=1), then take absolute and mean
-                        col = torch.mean(torch.abs(torch.mean(x, dim=1)))
-                        return (row + col) / 2
-                    loss_gr = 0
-                    for key, value in mb_all_texts.items():
-                        gr_splits = actor._get_green_red_split(actor.embed_map_model, value)
-                        gr_splits = torch.stack(gr_splits, dim=0)
-                        gr_splits = gr_splits * 2 - 1  # convert to [-1, 1] range
-                        # Calculate loss for uniform perturbation and unbiased token preference
-                        current_loss_gr = sign_loss(gr_splits)
-                        loss_gr += current_loss_gr
-                        wandb.log({f"train/gr_loss_{key}": current_loss_gr.item()}, step=global_step)
-                        del gr_splits, current_loss_gr
+                    raise NotImplementedError("GR loss is not implemented yet.")
+                    # # TODO: compute this loss on all texts (ori, wm, para, senti, hate) in the minibatch
+                    # # gather all data
+                    # mb_all_texts = {'original': mb_original_text,
+                    #                 'watermarked': [t[0] for g in mb_watermarked_tuples for t in g],  # [mb_size * G]
+                    #                 'para': mb_attack_texts['para'],
+                    #                 'senti': mb_attack_texts['senti'],
+                    #                 'hate': mb_attack_texts['hate']}
+                    # # calculate gr splits
+                    # def sign_loss(x):
+                    #     # Mean over rows (dim=0), then take absolute and mean
+                    #     row = torch.mean(torch.abs(torch.mean(x, dim=0)))
+                    #     # Mean over columns (dim=1), then take absolute and mean
+                    #     col = torch.mean(torch.abs(torch.mean(x, dim=1)))
+                    #     return (row + col) / 2
+                    # loss_gr = 0
+                    # for key, value in mb_all_texts.items():
+                    #     gr_splits = actor._get_green_red_split(actor.embed_map_model, value)
+                    #     gr_splits = torch.stack(gr_splits, dim=0)
+                    #     gr_splits = gr_splits * 2 - 1  # convert to [-1, 1] range
+                    #     # Calculate loss for uniform perturbation and unbiased token preference
+                    #     current_loss_gr = sign_loss(gr_splits)
+                    #     loss_gr += current_loss_gr
+                    #     wandb.log({f"train/gr_loss_{key}": current_loss_gr.item()}, step=global_step)
+                    #     del gr_splits, current_loss_gr
 
                 if args.add_similarity_loss:
-                    import torch.nn.functional as F
-                    # Compute similarity loss between original and watermarked texts
-                    ori_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)  # [mb_size]
-                    ori_green_red_splits = [g.repeat(args.G, 1) for g in ori_green_red_splits]
-                    ori_green_red_splits = torch.cat(ori_green_red_splits, dim=0)  # [mb_size * G, vocab_size]
-                    ori_green_red_splits = 2 * ori_green_red_splits - 1  # convert to [-1, 1] range
-                    mb_watermarked_texts = [t[0] for g in mb_watermarked_tuples for t in g]
-                    wm_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_watermarked_texts)
-                    wm_green_red_splits = torch.stack(wm_green_red_splits, dim=0) 
-                    wm_green_red_splits = 2 * wm_green_red_splits - 1
-                    cos_sim = F.cosine_similarity(ori_green_red_splits, wm_green_red_splits, dim=1)  # shape: [batch_size]
-                    loss_sim = 1 - cos_sim.mean()
+                    raise NotImplementedError("Similarity loss is not implemented yet.")
+                    # import torch.nn.functional as F
+                    # # Compute similarity loss between original and watermarked texts
+                    # ori_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)  # [mb_size]
+                    # ori_green_red_splits = [g.repeat(args.G, 1) for g in ori_green_red_splits]
+                    # ori_green_red_splits = torch.cat(ori_green_red_splits, dim=0)  # [mb_size * G, vocab_size]
+                    # ori_green_red_splits = 2 * ori_green_red_splits - 1  # convert to [-1, 1] range
+                    # mb_watermarked_texts = [t[0] for g in mb_watermarked_tuples for t in g]
+                    # wm_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_watermarked_texts)
+                    # wm_green_red_splits = torch.stack(wm_green_red_splits, dim=0) 
+                    # wm_green_red_splits = 2 * wm_green_red_splits - 1
+                    # cos_sim = F.cosine_similarity(ori_green_red_splits, wm_green_red_splits, dim=1)  # shape: [batch_size]
+                    # loss_sim = 1 - cos_sim.mean()
 
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
                         new_logprobs = new_mb_logprobs[j][i]  # [seq_len_i]
-                        old_logprobs = mb_watermarked_tuples[j][i][2]
+                        old_logprobs = mb_green_red_maps_logps[j][i]
                         old_logprobs = old_logprobs.to(new_logprobs.device)
                         # import pdb; pdb.set_trace()  # new: has gradient, old: no gradient
                         try:
@@ -1100,7 +1073,7 @@ if __name__ == "__main__":
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 ### free memory
-                del mb_original_text, mb_watermarked_tuples, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
+                del mb_original_text, mb_green_red_maps, mb_green_red_maps_logps, mb_watermarked_texts, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1121,15 +1094,12 @@ if __name__ == "__main__":
                 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    valid_batch = {'original_text': valid_set}
-                    valid_batch['watermarked_tuples'] = []  # [B, G=1], each is (wm_text, wm_text_ids, logprobs)
-                    for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
-                        valid_original_data = valid_set[data_idx]
-                        # watermarking
-                        with torch.no_grad():
-                            valid_watermarked_tuples = actor.rollout(valid_original_data, 1)
-                        valid_batch['watermarked_tuples'].append(valid_watermarked_tuples)
-                        # import pdb; pdb.set_trace()  # check if valid_watermarked_tuples shape: [(wm_text, wm_text_ids, logprobs)]
+                    # watermark
+                    with torch.no_grad():
+                        green_red_probs = actor._get_green_red_split(actor.embed_map_model, valid_set)
+                    green_red_maps = torch.bernoulli(green_red_probs)
+                    green_red_splits = [m[actor.mapping_list] for m in green_red_maps]
+                    watermarked_texts = [actor.generate_watermarked_text(text, split) for text, split in zip(valid_set, green_red_splits)]
                     # attack
                     result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs, ppl_coef=args.ppl_coef)
                     valid_batch = result_dict['batch']
@@ -1152,7 +1122,8 @@ if __name__ == "__main__":
                             "eval/median_ppl": safe_median(result_dict['ppl']),
                         }, step=global_step)
                     # Compute and log green token ratios
-                    green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
+                    with torch.no_grad():
+                        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
                     wandb.log({
                         "eval/green_ratio_mean": np.mean(green_token_ratios),
                         "eval/green_ratio_max": np.max(green_token_ratios),

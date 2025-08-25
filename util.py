@@ -11,6 +11,30 @@ from sklearn.metrics import roc_curve, roc_auc_score
 
 from attack import run_attacks_vllm, run_attacks_api
 
+def str_to_torch_dtype(dtype_str):
+    """
+    Map a string dtype to the corresponding torch dtype.
+    Example: 'float32' -> torch.float32, 'bfloat16' -> torch.bfloat16
+    """
+    dtype_map = {
+        'float32': torch.float32,
+        'float': torch.float32,
+        'float64': torch.float64,
+        'double': torch.float64,
+        'float16': torch.float16,
+        'half': torch.float16,
+        'bfloat16': torch.bfloat16,
+        'long': torch.long,
+        'int64': torch.int64,
+        'int32': torch.int32,
+        'int': torch.int32,
+        'bool': torch.bool,
+    }
+    key = dtype_str.lower()
+    if key not in dtype_map:
+        raise ValueError(f"Unknown dtype string: {dtype_str}")
+    return dtype_map[key]
+
 def vocabulary_mapping(vocab_size, model_output_dim, seed=66):
     random.seed(seed)
     return [random.randint(0, model_output_dim-1) for _ in range(vocab_size)]
@@ -131,15 +155,15 @@ def fill_na(values):
     return [avg_value if v is None else v for v in values]
 
 
-def run_attacks(watermarked_tuples, detect_score_coefs, client=None, tokenizer=None):
+def run_attacks(watermarked_texts, detect_score_coefs, client=None, tokenizer=None):
     """
     Args:
-        watermarked_tuples (list): [B, G], each is (wm_text, wm_text_ids, logprobs)
+        watermarked_texts (list): [B, G], each is a string of watermarked text
         detect_score_coefs (dict): include the specific attack if corresponding value is not zero
     """
     attack_flags = {k: bool(v) for k, v in detect_score_coefs.items() if k not in ('ori', 'wm')}
     if client is not None and tokenizer is not None:
-        attack_texts = run_attacks_vllm(watermarked_tuples, attack_flags, client, tokenizer)
+        attack_texts = run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer)
     else:  # TODO
         raise NotImplementedError("run_attacks_api is not implemented for this case")
         # wm_tuples, attack_para_texts, attack_senti_texts, attack_hate_texts = run_attacks_api(watermarked_tuples)
