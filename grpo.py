@@ -142,7 +142,7 @@ class Args:
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
     """the name of the dataset"""
-    eval_batch_size: int = 100  # 100
+    eval_batch_size: int = 10  # 100
 
     # General training arguments
     checkpoint_dir: str = None
@@ -151,7 +151,7 @@ class Args:
     """the name of the run logged to wandb"""
     do_eval: bool = False
     """if toggled, the model will be evaluated every `eval_steps` steps"""
-    eval_steps: int = 10
+    eval_steps: int = 1
     """the number of steps between evaluations"""
 
     # Sanity check arguments
@@ -1061,13 +1061,15 @@ if __name__ == "__main__":
                     loss += total_loss_rg
                     del total_loss_rg  # free memory
                 if args.add_gr_loss:
-                    loss += loss_gr.to(loss.device)
-                    wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
-                    del loss_gr  # free memory
+                    raise NotImplementedError("GR loss is not implemented yet.")
+                    # loss += loss_gr.to(loss.device)
+                    # wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
+                    # del loss_gr  # free memory
                 if args.add_similarity_loss:
-                    loss += loss_sim.to(loss.device)
-                    wandb.log({"train/sim_loss": loss_sim.item()}, step=global_step)
-                    del loss_sim
+                    raise NotImplementedError("Similarity loss is not implemented yet.")
+                    # loss += loss_sim.to(loss.device)
+                    # wandb.log({"train/sim_loss": loss_sim.item()}, step=global_step)
+                    # del loss_sim
                 loss /= total_output_len  # average over the total output length
                 # import pdb; pdb.set_trace()  # check device. loss: ; total_loss_pg: ; total_kl: ; total_loss_rg: ; all at tf wm model's gpu
                 wandb.log({"train/loss": loss.item()}, step=global_step)
@@ -1094,12 +1096,12 @@ if __name__ == "__main__":
                 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    # watermark
-                    with torch.no_grad():
-                        green_red_probs = actor._get_green_red_split(actor.embed_map_model, valid_set)
-                    green_red_maps = torch.bernoulli(green_red_probs)
-                    green_red_splits = [m[actor.mapping_list] for m in green_red_maps]
-                    watermarked_texts = [actor.generate_watermarked_text(text, split) for text, split in zip(valid_set, green_red_splits)]
+                    valid_batch = {'original_text': valid_set}
+                    valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
+                    for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
+                        valid_original_data = valid_set[data_idx]
+                        _, _, valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
+                        valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
                     # attack
                     result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs, ppl_coef=args.ppl_coef)
                     valid_batch = result_dict['batch']
