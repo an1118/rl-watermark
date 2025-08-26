@@ -302,10 +302,7 @@ class Actor(nn.Module):
         ).to(model.device)
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
-        # Normalize each row to [0, 1] while preserving ratios
-        min_vals = mappings.min(dim=1, keepdim=True)[0]
-        max_vals = mappings.max(dim=1, keepdim=True)[0]
-        mappings = (mappings - min_vals) / (max_vals - min_vals + 1e-8)
+        mappings = torch.sigmoid(mappings)
         mappings = mappings.to(self.watermark_model.device)
         # import pdb; pdb.set_trace()  # check mapping shape: [B, 384], should have gradient
         return mappings
