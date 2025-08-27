@@ -11,6 +11,30 @@ from sklearn.metrics import roc_curve, roc_auc_score
 
 from attack import run_attacks_vllm, run_attacks_api
 
+def str_to_torch_dtype(dtype_str):
+    """
+    Map a string dtype to the corresponding torch dtype.
+    Example: 'float32' -> torch.float32, 'bfloat16' -> torch.bfloat16
+    """
+    dtype_map = {
+        'float32': torch.float32,
+        'float': torch.float32,
+        'float64': torch.float64,
+        'double': torch.float64,
+        'float16': torch.float16,
+        'half': torch.float16,
+        'bfloat16': torch.bfloat16,
+        'long': torch.long,
+        'int64': torch.int64,
+        'int32': torch.int32,
+        'int': torch.int32,
+        'bool': torch.bool,
+    }
+    key = dtype_str.lower()
+    if key not in dtype_map:
+        raise ValueError(f"Unknown dtype string: {dtype_str}")
+    return dtype_map[key]
+
 def vocabulary_mapping(vocab_size, model_output_dim, seed=66):
     random.seed(seed)
     return [random.randint(0, model_output_dim-1) for _ in range(vocab_size)]
