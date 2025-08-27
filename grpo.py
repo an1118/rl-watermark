@@ -360,7 +360,7 @@ class Actor(nn.Module):
         green_red_probs = self._get_green_red_split(embed_map_model, texts)
         if not has_gradient:
             green_red_probs = [g.detach() for g in green_red_probs]
-        if has_gradient: import pdb; pdb.set_trace()  # check gradient
+        # if has_gradient: import pdb; pdb.set_trace()  # check gradient
 
         # start_time = time.time()
         # Tokenize the batch
@@ -441,7 +441,7 @@ class Actor(nn.Module):
         # print(f"===========", flush=True)
         del all_entropy, inputs, green_red_probs  # free memory
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
-        if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
+        # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
         return scores
 
@@ -684,8 +684,6 @@ def evaluation(actor, valid_set, config, best_mean_detect):
     }, step=actor.global_step)
     print(f"Step {actor.global_step} - AUCs on valid set: detect={auc_detect:.4f}, para={auc_para:.4f}, senti={auc_senti:.4f}, hate={auc_hate:.4f}")
     
-    import pdb; pdb.set_trace()  # check auc values
-    
     # save the best checkpoint if needed
     overall_auc = (auc_detect + auc_para + (1 - auc_senti) + (1 - auc_hate)) / 4
     # save ckpt with best overall auc
@@ -849,7 +847,6 @@ if __name__ == "__main__":
 
     if args.eval_first:
         evaluation(actor, valid_set, args, best_mean_detect)
-        import pdb; pdb.set_trace()  # check if eval works
     
     for epoch in range(1, args.num_iterations + 1):
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
