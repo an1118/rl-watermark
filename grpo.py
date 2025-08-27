@@ -153,6 +153,8 @@ class Args:
     """if toggled, the model will be evaluated every `eval_steps` steps"""
     eval_steps: int = 1
     """the number of steps between evaluations"""
+    eval_first: bool = True
+    """if toggled, the model will be evaluated before the first training iteration"""
 
     # Sanity check arguments
     is_sanity_check: bool = False
@@ -161,6 +163,8 @@ class Args:
     # to be filled in runtime
     minibatch_size: int = 0
     """the mini-batch size (computed in runtime)"""
+    detect_score_coefs: dict = None
+    """a dictionary containing the coefficients of different detection scores"""
 
     def __post_init__(self):
         if self.use_median_split and self.add_gr_loss:
@@ -464,19 +468,7 @@ class Actor(nn.Module):
     def compute_rewards(
         self, 
         batch, 
-        binary, 
-        detect_score_coefs,
         attack_texts=None, 
-        ori_score_strategy='raw',
-        target_ori_score=None, 
-        max_step=None, 
-        ori_growth_rate=None,
-        ori_growth_rate2=None,
-        wm_score_strategy='raw',
-        wm_growth_rate=None,
-        para_score_strategy='raw',
-        para_growth_rate=None,
-        ppl_coef=0.0,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -484,13 +476,13 @@ class Actor(nn.Module):
         Args:
             batch (dictionary): All info included in this batch.
             attack_texts (dict): Optional; A dictionary containing different attack texts.
-            ori_score_strategy (str): Strategy to compute the original text's score. [raw, abs, dynamic, gap]
-            wm_score_strategy (str): Strategy to compute the watermarked text's score. [raw, abs, dynamic, gap]
-            para_score_strategy (str): Strategy to compute the paraphrased text's score. [raw, abs, dynamic, gap]
 
         Returns:
             dict: A dict of computed reward values for each watermarked_text.
         """
+        # prepare curriculum
+        detect_score_coefs = curriculum_learning_schedule(args.curriculum, self.global_step, self.config.detect_steps, self.config.spoof_steps, self.config.detect_score_coefs)
+
         # detectability
         ## run attack or get generated attack texts
         if attack_texts:
@@ -513,7 +505,7 @@ class Actor(nn.Module):
         
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
-        ori_has_gradient = has_gradient and (binary or bool(detect_score_coefs['ori']))
+        ori_has_gradient = has_gradient and (self.config.binary or bool(detect_score_coefs['ori']))
         detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient)
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
@@ -539,7 +531,7 @@ class Actor(nn.Module):
         detect_senti_filled = [fill_na(s) for s in detect_senti]
         
         ## compute perplexity if needed
-        if ppl_coef > 0.0:
+        if self.config.ppl_coef > 0.0:
             ppl = self.compute_ppl([t[0] for g in batch['watermarked_tuples'] for t in g])
             ppl = regroup_list(ppl, B, G)
 
@@ -567,7 +559,7 @@ class Actor(nn.Module):
                 f"{len(detect_wm[b_idx])}, {len(detect_para_filled[b_idx])}, {len(detect_senti_filled[b_idx])}, {len(detect_hate[b_idx])}"
             for r_idx in range(len(detect_wm[b_idx])):
                 d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][r_idx], detect_para_filled[b_idx][r_idx], detect_senti_filled[b_idx][r_idx], detect_hate[b_idx][r_idx]
-                if binary:
+                if self.config.binary:
                     r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
                     r_para = reward_should_detect(d_para, d_ori, threshold_para)
 
@@ -583,19 +575,19 @@ class Actor(nn.Module):
                     )
                         # detect_score_coefs['latter'] * r_senti_latter +
                     # import pdb; pdb.set_trace()  # check if reward values calculated correctly
-                    if ppl_coef > 0.0:
-                        reward += ppl_coef * ppl[b_idx][r_idx]
+                    if self.config.ppl_coef > 0.0:
+                        reward += self.config.ppl_coef * ppl[b_idx][r_idx]
                     rewards.append(reward)
                     tmp = r_wm + r_para + r_senti + r_hate
                     detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
                 else:
                     # different ways to calculate score and coefficient
                     d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
-                        ori_score_strategy, d_ori, detect_score_coefs['ori'], target_ori_score, self.global_step, max_step, ori_growth_rate, ori_growth_rate2)
+                        self.config.ori_score_strategy, d_ori, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
                     _, detect_score_coefs['wm'] = coef_strategy(
-                        wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, max_step, wm_growth_rate)
+                        self.config.wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, self.config.max_step, self.config.wm_growth_rate)
                     _, detect_score_coefs['para'] = coef_strategy(
-                        para_score_strategy, d_para, detect_score_coefs['para'], 0, self.global_step, max_step, para_growth_rate)
+                        self.config.para_score_strategy, d_para, detect_score_coefs['para'], 0, self.global_step, self.config.max_step, self.config.para_growth_rate)
 
                     tmp1 = (
                         - detect_score_coefs['ori'] * d_ori_modified
@@ -630,11 +622,76 @@ class Actor(nn.Module):
             'sucess_para': len([t for t in attack_para_texts if t is not None]) / len(attack_para_texts),
             'sucess_senti': len([t for t in attack_senti_texts if t is not None]) / len(attack_senti_texts),
         }
-        if ppl_coef > 0.0:
+        if self.config.ppl_coef > 0.0:
             result_dict['ppl'] = torch.tensor(ppl).flatten()
 
         return result_dict
 
+
+def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
+    ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
+    # save the embed_map model + tokenizer
+    actor.embed_map_model.save_pretrained(ckpt_path)
+    actor.embed_map_tokenizer.save_pretrained(ckpt_path)
+    print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
+
+def evaluation(actor, valid_set, config, best_mean_detect):
+    valid_batch = {'original_text': valid_set}
+    valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
+    for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
+        valid_original_data = valid_set[data_idx]
+        _, _, valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
+        valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
+    # attack
+    result_dict = actor.compute_rewards(valid_batch)
+    valid_batch = result_dict['batch']
+    # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
+    # Log the median of each score to wandb
+    def safe_median(x):
+        x = [v for v in x if v is not None]
+        if isinstance(x[0], torch.Tensor):
+            x = [v.item() for v in x]
+        return float(np.median(x))
+    wandb.log({
+        "eval/median_ori_score": safe_median(result_dict['detect_ori']),
+        "eval/median_wm_score": safe_median(result_dict['detect_wm']),
+        "eval/median_para_score": safe_median(result_dict['detect_para']),
+        "eval/median_senti_score": safe_median(result_dict['detect_senti']),
+        "eval/median_hate_score": safe_median(result_dict['detect_hate']),
+    }, step=actor.global_step)
+    if 'ppl' in result_dict:
+        wandb.log({
+            "eval/median_ppl": safe_median(result_dict['ppl']),
+        }, step=actor.global_step)
+    # Compute and log green token ratios
+    with torch.no_grad():
+        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
+    wandb.log({
+        "eval/green_ratio_mean": np.mean(green_token_ratios),
+        "eval/green_ratio_max": np.max(green_token_ratios),
+        "eval/green_ratio_min": np.min(green_token_ratios),
+    }, step=actor.global_step)
+    # Compute and log the auc for each dimension
+    auc_detect, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_wm'])
+    auc_para, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_para'])
+    auc_senti, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_senti'])
+    auc_hate, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_hate'])
+    wandb.log({
+        "eval/auc_detect": auc_detect,
+        "eval/auc_para": auc_para,
+        "eval/auc_senti": auc_senti,
+        "eval/auc_hate": auc_hate,
+    }, step=actor.global_step)
+    print(f"Step {actor.global_step} - AUCs on valid set: detect={auc_detect:.4f}, para={auc_para:.4f}, senti={auc_senti:.4f}, hate={auc_hate:.4f}")
+    
+    import pdb; pdb.set_trace()  # check auc values
+    
+    # save the best checkpoint if needed
+    overall_auc = (auc_detect + auc_para + (1 - auc_senti) + (1 - auc_hate)) / 4
+    # save ckpt with best overall auc
+    if overall_auc > best_auc and actor.global_step > 0:
+        best_auc = overall_auc
+        save_checkpoint(actor, config.checkpoint_dir, "best-overall_auc", best_mean_detect, actor.global_step)
 
 
 if __name__ == "__main__":
@@ -652,6 +709,7 @@ if __name__ == "__main__":
         # "latter": args.detect_score_coefs_latter,
         "hate": args.detect_score_coefs_hate,
     }
+    args.detect_score_coefs = detect_score_coefs
 
     if args.curriculum.lower() == "none":
         args.curriculum = None
@@ -789,11 +847,12 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
 
-
+    if args.eval_first:
+        evaluation(actor, valid_set, args, best_mean_detect)
+        import pdb; pdb.set_trace()  # check if eval works
+    
     for epoch in range(1, args.num_iterations + 1):
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
-            # prepare curriculum
-            detect_score_coefs = curriculum_learning_schedule(args.curriculum, global_step, args.detect_steps, args.spoof_steps, detect_score_coefs)
 
             batch = defaultdict(list)
             batch['original_text'] = train_set[iteration : iteration + args.batch_size]
@@ -811,18 +870,6 @@ if __name__ == "__main__":
             ## compute rewards
             result_dict = actor.compute_rewards(
                 batch,
-                args.binary,
-                detect_score_coefs,
-                ori_score_strategy=args.ori_score_strategy,
-                target_ori_score=args.target_ori_score,
-                max_step=args.max_step,
-                ori_growth_rate=args.ori_growth_rate,
-                ori_growth_rate2=args.ori_growth_rate2,
-                wm_score_strategy=args.wm_score_strategy,
-                wm_growth_rate=args.wm_growth_rate,
-                para_score_strategy=args.para_score_strategy,
-                para_growth_rate=args.para_growth_rate,
-                ppl_coef=args.ppl_coef,
             )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
@@ -835,12 +882,6 @@ if __name__ == "__main__":
 
             ## save best checkpoint
             if not args.do_eval and global_step > 0:
-                def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
-                    ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
-                    # save the embed_map model + tokenizer
-                    actor.embed_map_model.save_pretrained(ckpt_path)
-                    actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-                    print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}")
                 # save ckpt with best detec scores
                 if current_mean_detect > best_mean_detect:
                     best_mean_detect = current_mean_detect
@@ -927,19 +968,7 @@ if __name__ == "__main__":
                             'original_text': mb_original_text,
                             'watermarked_texts': mb_watermarked_texts
                         },
-                        args.binary,
-                        detect_score_coefs,
                         attack_texts=mb_attack_texts,
-                        ori_score_strategy=args.ori_score_strategy,
-                        target_ori_score=args.target_ori_score,
-                        max_step=args.max_step,
-                        ori_growth_rate=args.ori_growth_rate,
-                        ori_growth_rate2=args.ori_growth_rate2,
-                        wm_score_strategy=args.wm_score_strategy,
-                        wm_growth_rate=args.wm_growth_rate,
-                        para_score_strategy=args.para_score_strategy,
-                        para_growth_rate=args.para_growth_rate,
-                        ppl_coef=args.ppl_coef,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
@@ -1093,67 +1122,10 @@ if __name__ == "__main__":
                 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    valid_batch = {'original_text': valid_set}
-                    valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
-                    for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
-                        valid_original_data = valid_set[data_idx]
-                        _, _, valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
-                        valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
-                    # attack
-                    result_dict = actor.compute_rewards(valid_batch, args.binary, detect_score_coefs, ppl_coef=args.ppl_coef)
-                    valid_batch = result_dict['batch']
-                    # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
-                    # Log the median of each score to wandb
-                    def safe_median(x):
-                        x = [v for v in x if v is not None]
-                        if isinstance(x[0], torch.Tensor):
-                            x = [v.item() for v in x]
-                        return float(np.median(x))
-                    wandb.log({
-                        "eval/median_ori_score": safe_median(result_dict['detect_ori']),
-                        "eval/median_wm_score": safe_median(result_dict['detect_wm']),
-                        "eval/median_para_score": safe_median(result_dict['detect_para']),
-                        "eval/median_senti_score": safe_median(result_dict['detect_senti']),
-                        "eval/median_hate_score": safe_median(result_dict['detect_hate']),
-                    }, step=global_step)
-                    if 'ppl' in result_dict:
-                        wandb.log({
-                            "eval/median_ppl": safe_median(result_dict['ppl']),
-                        }, step=global_step)
-                    # Compute and log green token ratios
-                    with torch.no_grad():
-                        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
-                    wandb.log({
-                        "eval/green_ratio_mean": np.mean(green_token_ratios),
-                        "eval/green_ratio_max": np.max(green_token_ratios),
-                        "eval/green_ratio_min": np.min(green_token_ratios),
-                    }, step=global_step)
-                    # Compute and log the auc for each dimension
-                    auc_detect, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_wm'])
-                    auc_para, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_para'])
-                    auc_senti, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_senti'])
-                    auc_hate, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_hate'])
-                    wandb.log({
-                        "eval/auc_detect": auc_detect,
-                        "eval/auc_para": auc_para,
-                        "eval/auc_senti": auc_senti,
-                        "eval/auc_hate": auc_hate,
-                    }, step=global_step)
-                    print(f"Step {global_step} - AUCs on valid set: detect={auc_detect:.4f}, para={auc_para:.4f}, senti={auc_senti:.4f}, hate={auc_hate:.4f}")
-                    
-                    # save the best checkpoint if needed
-                    overall_auc = (auc_detect + auc_para + (1 - auc_senti) + (1 - auc_hate)) / 4
-                    def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
-                        ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
-                        # save the embed_map model + tokenizer
-                        actor.embed_map_model.save_pretrained(ckpt_path)
-                        actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-                        print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
-                    # save ckpt with best overall auc
-                    if overall_auc > best_auc:
-                        best_auc = overall_auc
-                        save_checkpoint(actor, args.checkpoint_dir, "best-overall_auc", best_mean_detect, global_step)
+                    evaluation(actor, valid_set, args, best_mean_detect)
 
                 if global_step >= args.max_step:
                     print(f"Reached max_step {args.max_step}. Stopping training.")
                     exit(0)
+
+
