@@ -679,7 +679,7 @@ def evaluation(actor, valid_set, config, best_auc):
     valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
         valid_original_data = valid_set[data_idx]
-        _, _, valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
+        valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
         valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
     # attack
     result_dict = actor.compute_rewards(valid_batch)
