@@ -723,8 +723,6 @@ def evaluation(actor, valid_set, config, best_mean_detect):
     }, step=actor.global_step)
     print(f"Step {actor.global_step} - AUCs on valid set: detect={auc_detect:.4f}, para={auc_para:.4f}, senti={auc_senti:.4f}, hate={auc_hate:.4f}")
     
-    import pdb; pdb.set_trace()  # check auc values
-    
     # save the best checkpoint if needed
     overall_auc = (auc_detect + auc_para + (1 - auc_senti) + (1 - auc_hate)) / 4
     # save ckpt with best overall auc
