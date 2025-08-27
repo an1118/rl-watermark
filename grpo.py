@@ -674,7 +674,7 @@ def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, 
     actor.embed_map_tokenizer.save_pretrained(ckpt_path)
     print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
 
-def evaluation(actor, valid_set, config, best_mean_detect):
+def evaluation(actor, valid_set, config, best_auc):
     valid_batch = {'original_text': valid_set}
     valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
@@ -728,7 +728,8 @@ def evaluation(actor, valid_set, config, best_mean_detect):
     # save ckpt with best overall auc
     if overall_auc > best_auc and actor.global_step > 0:
         best_auc = overall_auc
-        save_checkpoint(actor, config.checkpoint_dir, "best-overall_auc", best_mean_detect, actor.global_step)
+        save_checkpoint(actor, config.checkpoint_dir, "best-overall_auc", best_auc, actor.global_step)
+    return best_auc
 
 
 if __name__ == "__main__":
@@ -885,8 +886,8 @@ if __name__ == "__main__":
     start_time = time.time()
 
     if args.eval_first:
-        evaluation(actor, valid_set, args, best_mean_detect)
-    
+        best_auc = evaluation(actor, valid_set, args, best_auc)
+
     for epoch in range(1, args.num_iterations + 1):
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
 
@@ -1151,7 +1152,7 @@ if __name__ == "__main__":
                 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    evaluation(actor, valid_set, args, best_mean_detect)
+                    best_auc = evaluation(actor, valid_set, args, best_auc)
 
                 if global_step >= args.max_step:
                     print(f"Reached max_step {args.max_step}. Stopping training.")
