@@ -147,18 +147,35 @@ def safe(t, device):
     return t if t is not None else torch.tensor(0.0, device=device)
 
 
-def fill_na(values):
+def fill_na(values, device=None, default_value=0.5):
+    values = deepcopy(values)
+    # Case 1: flat list of tensor or None
     if all(v is None for v in values):
-        return [torch.tensor(0.0)] * len(values)
-    valid_values = [v for v in values if v is not None]
-    avg_value = torch.stack(valid_values).mean()
-    return [avg_value if v is None else v for v in values]
+        return [torch.tensor(default_value, device=device)] * len(values)
+    if any(isinstance(v, torch.Tensor) for v in values) and not isinstance(values[0], list):
+        valid_values = [v for v in values if v is not None]
+        avg_value = torch.stack(valid_values).mean()
+        return [avg_value if v is None else v for v in values]
+    # Case 2: list of lists
+    elif isinstance(values[0], list):
+        # Flatten all tensors in all sublists
+        all_tensors = [item for sublist in values for item in sublist if item is not None]
+        if len(all_tensors) == 0:
+            avg_value = torch.tensor(default_value, device=device)
+        else:
+            avg_value = torch.stack(all_tensors).mean()
+        # Fill None in each sublist with avg_value
+        for i, sublist in enumerate(values):
+            values[i] = [avg_value if v is None else v for v in sublist]
+        return values
+    else:
+        raise ValueError("Unsupported value type in fill_na")
 
 
 def run_attacks(watermarked_texts, detect_score_coefs, client=None, tokenizer=None):
     """
     Args:
-        watermarked_texts (list): [B, G], each is a string of watermarked text
+        watermarked_texts (list): [B, G, num_wm], each is a string of watermarked text
         detect_score_coefs (dict): include the specific attack if corresponding value is not zero
     """
     attack_flags = {k: bool(v) for k, v in detect_score_coefs.items() if k not in ('ori', 'wm')}
@@ -244,12 +261,20 @@ def calculate_roc_auc(negative_scores, positive_scores):
     return auc, fpr, tpr
 
 
-def regroup_list(flat_list, batch, group):
+def regroup_list(flat_list, batch, group, num_wm=1):
     """
-    Reshape a flat list of length batch*group into a list of (batch) lists, each of length (group).
+    Reshape a flat list of length batch*group*num_wm into a nested list of shape (batch, group, num_wm).
     """
-    assert len(flat_list) == batch * group, "Input list length does not match B*G"
-    return [flat_list[i * group:(i + 1) * group] for i in range(batch)]
+    assert len(flat_list) == batch * group * num_wm, "Input list length does not match batch*group*num_wm"
+    nested = []
+    idx = 0
+    for b in range(batch):
+        group_list = []
+        for g in range(group):
+            group_list.append(flat_list[idx:idx+num_wm])
+            idx += num_wm
+        nested.append(group_list)
+    return nested
 
 
 def exponential_schedule(step, max_step, growth_rate, min_val=1, max_val=100):

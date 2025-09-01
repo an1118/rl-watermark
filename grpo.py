@@ -59,6 +59,8 @@ class Args:
     """the number of mini-batches"""
     G: int = 2  # 8
     """the number of rollouts generated for each original text"""
+    num_wm: int = 2
+    """the number of watermarked texts generated for each rollout"""
     lr_scheduler_type: str = "constant"
     """the type of learning rate scheduler, can be one of [linear, constant]"""
     learning_rate: float = 1e-5
@@ -259,7 +261,7 @@ class Actor(nn.Module):
 
         # Generate watermarked texts
         green_red_splits = [m[self.mapping_list] for m in green_red_maps]
-        watermarked_texts = [self.generate_watermarked_text(text, split) for split in green_red_splits]
+        watermarked_texts = [self.generate_watermarked_text(text, split, n=self.config.num_wm) for split in green_red_splits] # list of list of strings, len: (G, num_wm)
         return green_red_maps, green_red_maps_logps, watermarked_texts
     
     def get_logps(self, mappings, green_red_prob):
@@ -271,7 +273,7 @@ class Actor(nn.Module):
         mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
         return mappings_logps
 
-    def generate_watermarked_text(self, text, green_red_split):
+    def generate_watermarked_text(self, text, green_red_split, n=1):
         # add prompt instruction
         messages = [
             {
@@ -287,14 +289,15 @@ class Actor(nn.Module):
         # generate watermarked text
         logits_processors = [WatermarkLogitsBias(green_red_split, self.alpha, self.delta)]
         sampling_params = SamplingParams(
+            n=n,
             top_p=0.9,
             max_tokens=500,
             logits_processors=logits_processors,
         )
         outputs = self.watermark_model_vllm.generate([prompt], sampling_params, use_tqdm=False)
         ## save output results
-        watermarked_text = outputs[0].outputs[0].text
-        return watermarked_text
+        watermarked_texts = [o.text.strip() for o in outputs[0].outputs]
+        return watermarked_texts
 
     def _get_green_red_split(self, model, texts):
         input_ids = self.embed_map_tokenizer(
@@ -373,7 +376,7 @@ class Actor(nn.Module):
         # tokenization_time = time.time() - start_time
         # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
 
-        mini_batch_size = 128
+        mini_batch_size = 256
 
         all_entropy = []
         for start in range(0, len(texts), mini_batch_size):
@@ -502,6 +505,7 @@ class Actor(nn.Module):
         has_gradient = True if attack_texts else False
         B = len(batch['original_text'])  # batch size
         G = len(batch['watermarked_texts'][0])  # rollout size
+        num_wm = len(batch['watermarked_texts'][0][0])  # number of watermarked texts per rollout
         
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
@@ -509,31 +513,32 @@ class Actor(nn.Module):
         detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient)
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm = self.detect([t for g in batch['watermarked_texts'] for t in g], has_gradient=wm_has_gradient)
-        detect_wm = regroup_list(detect_wm, B, G)
+        detect_wm = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient)
+        detect_wm = regroup_list(detect_wm, B, G, num_wm)
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
         detect_para = self.detect(attack_para_texts, has_gradient=para_has_gradient)
-        detect_para = regroup_list(detect_para, B, G)
+        detect_para = regroup_list(detect_para, B, G, num_wm)
 
         senti_has_gradient=has_gradient and bool(detect_score_coefs['senti'])
         detect_senti = self.detect(attack_senti_texts, has_gradient=senti_has_gradient)
-        detect_senti = regroup_list(detect_senti, B, G)
+        detect_senti = regroup_list(detect_senti, B, G, num_wm)
 
         hate_has_gradient=has_gradient and bool(detect_score_coefs['hate'])
         detect_hate = self.detect(attack_hate_texts, has_gradient=hate_has_gradient)
-        detect_hate = regroup_list(detect_hate, B, G)
+        detect_hate = regroup_list(detect_hate, B, G, num_wm)
         detect_time = time.time() - start_time
         print(f"Detection time: {detect_time:.4f} seconds")
 
         ## fill in the None values
-        detect_para_filled = [fill_na(s) for s in detect_para]
-        detect_senti_filled = [fill_na(s) for s in detect_senti]
-        
+        d = self.watermark_model.device
+        detect_para_filled = [fill_na(s, device=d) for s in detect_para]
+        detect_senti_filled = [fill_na(s, device=d) for s in detect_senti]
+
         ## compute perplexity if needed
         if self.config.ppl_coef > 0.0:
-            ppl = self.compute_ppl([t[0] for g in batch['watermarked_tuples'] for t in g])
-            ppl = regroup_list(ppl, B, G)
+            ppl = self.compute_ppl([t for b in batch['watermarked_texts'] for g in b for t in g])
+            ppl = regroup_list(ppl, B, G, num_wm)
 
         ## gather the detectability scores
         threshold_wm = 0.15  # TODO
@@ -557,53 +562,55 @@ class Actor(nn.Module):
             assert len(detect_wm[b_idx]) == len(detect_para_filled[b_idx]) == len(detect_senti_filled[b_idx]) == len(detect_hate[b_idx]), \
                 f"Batch {b_idx}: detect_wm, detect_para_filled, detect_senti_filled, detect_hate lengths do not match. " \
                 f"{len(detect_wm[b_idx])}, {len(detect_para_filled[b_idx])}, {len(detect_senti_filled[b_idx])}, {len(detect_hate[b_idx])}"
-            for r_idx in range(len(detect_wm[b_idx])):
-                d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][r_idx], detect_para_filled[b_idx][r_idx], detect_senti_filled[b_idx][r_idx], detect_hate[b_idx][r_idx]
-                if self.config.binary:
-                    r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
-                    r_para = reward_should_detect(d_para, d_ori, threshold_para)
+            for g_idx in range(len(detect_wm[b_idx])):
+                for n_idx in range(num_wm):
+                    d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][g_idx][n_idx], detect_para_filled[b_idx][g_idx][n_idx], detect_senti_filled[b_idx][g_idx][n_idx], detect_hate[b_idx][g_idx][n_idx]
+                    if self.config.binary:
+                        r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
+                        r_para = reward_should_detect(d_para, d_ori, threshold_para)
 
-                    r_senti = reward_should_not_detect(d_senti, d_ori, threshold_senti)
-                    # r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
-                    r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
+                        r_senti = reward_should_not_detect(d_senti, d_ori, threshold_senti)
+                        # r_senti_latter = reward_should_not_detect(d_senti_latter, d_ori, threshold_latter)
+                        r_hate = reward_should_not_detect(d_hate, d_ori, threshold_hate)
 
-                    reward = (
-                        detect_score_coefs['wm'] * r_wm +
-                        detect_score_coefs['para'] * r_para +
-                        detect_score_coefs['senti'] * r_senti +
-                        detect_score_coefs['hate'] * r_hate
-                    )
-                        # detect_score_coefs['latter'] * r_senti_latter +
-                    # import pdb; pdb.set_trace()  # check if reward values calculated correctly
-                    if self.config.ppl_coef > 0.0:
-                        reward += self.config.ppl_coef * ppl[b_idx][r_idx]
-                    rewards.append(reward)
-                    tmp = r_wm + r_para + r_senti + r_hate
-                    detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
-                else:
-                    # different ways to calculate score and coefficient
-                    d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
-                        self.config.ori_score_strategy, d_ori, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
-                    _, detect_score_coefs['wm'] = coef_strategy(
-                        self.config.wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, self.config.max_step, self.config.wm_growth_rate)
-                    _, detect_score_coefs['para'] = coef_strategy(
-                        self.config.para_score_strategy, d_para, detect_score_coefs['para'], 0, self.global_step, self.config.max_step, self.config.para_growth_rate)
+                        reward = (
+                            detect_score_coefs['wm'] * r_wm +
+                            detect_score_coefs['para'] * r_para +
+                            detect_score_coefs['senti'] * r_senti +
+                            detect_score_coefs['hate'] * r_hate
+                        )
+                            # detect_score_coefs['latter'] * r_senti_latter +
+                        # import pdb; pdb.set_trace()  # check if reward values calculated correctly
+                        if self.config.ppl_coef > 0.0:
+                            reward += self.config.ppl_coef * ppl[b_idx][g_idx]
+                        rewards.append(reward)
+                        tmp = r_wm + r_para + r_senti + r_hate
+                        detect_overall.append(tmp.detach() if isinstance(tmp, torch.Tensor) else tmp)
+                    else:
+                        # different ways to calculate score and coefficient
+                        d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
+                            self.config.ori_score_strategy, d_ori, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
+                        _, detect_score_coefs['wm'] = coef_strategy(
+                            self.config.wm_score_strategy, d_wm, detect_score_coefs['wm'], 0, self.global_step, self.config.max_step, self.config.wm_growth_rate)
+                        _, detect_score_coefs['para'] = coef_strategy(
+                            self.config.para_score_strategy, d_para, detect_score_coefs['para'], 0, self.global_step, self.config.max_step, self.config.para_growth_rate)
 
-                    tmp1 = (
-                        - detect_score_coefs['ori'] * d_ori_modified
-                        + detect_score_coefs['wm'] * d_wm
-                        + detect_score_coefs['para'] * d_para
-                        - detect_score_coefs['senti'] * d_senti
-                        - detect_score_coefs['hate'] * d_hate
-                    )
-                    # import pdb; pdb.set_trace()  # check if reward values calculated correctly
-                    rewards.append(tmp1)
+                        tmp1 = (
+                            - detect_score_coefs['ori'] * d_ori_modified
+                            + detect_score_coefs['wm'] * d_wm
+                            + detect_score_coefs['para'] * d_para
+                            - detect_score_coefs['senti'] * d_senti
+                            - detect_score_coefs['hate'] * d_hate
+                        )
+                        # import pdb; pdb.set_trace()  # check if reward values calculated correctly
+                        rewards.append(tmp1)
 
-                    # tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
-                    tmp2 = - d_ori + d_wm + d_para - d_senti - d_hate
-                    detect_overall.append(tmp2.detach() if isinstance(tmp2, torch.Tensor) else tmp2)
+                        # tmp2 = - d_ori + d_wm + d_para - d_senti - d_senti_latter - d_hate
+                        tmp2 = - d_ori + d_wm + d_para - d_senti - d_hate
+                        detect_overall.append(tmp2.detach() if isinstance(tmp2, torch.Tensor) else tmp2)
         
-        rewards = torch.stack(rewards).view(B, G)
+        rewards = torch.stack(rewards).view(B, G, num_wm)
+        rewards = rewards.mean(dim=-1)  # shape: (B, G)
         # if has_gradient: import pdb; pdb.set_trace()  # check if rewards has gradient
         batch['rewards'] = rewards
         
@@ -613,11 +620,11 @@ class Actor(nn.Module):
             # 'text_quality_scores': [s for s in text_quality_scores if s is not None],
             'detect_ori': torch.tensor(detect_ori),
             'detect_wm': torch.tensor(detect_wm).flatten(),
-            'detect_para': torch.tensor([d for abatch in detect_para for d in abatch if d is not None]),
-            'detect_senti': torch.tensor([d for abatch in detect_senti for d in abatch if d is not None]),
+            'detect_para': torch.tensor([d for b in detect_para for g in b for d in g if d is not None]),
+            'detect_senti': torch.tensor([d for b in detect_senti for g in b for d in g if d is not None]),
             # 'detect_senti_latter': torch.tensor([d for d in detect_senti_latter if d is not None]),
             'detect_hate': torch.tensor(detect_hate).flatten(),
-            'detect_overall': torch.tensor(detect_overall).view(B, G),
+            'detect_overall': torch.tensor(detect_overall),
             # =======debug======== #
             'sucess_para': len([t for t in attack_para_texts if t is not None]) / len(attack_para_texts),
             'sucess_senti': len([t for t in attack_senti_texts if t is not None]) / len(attack_senti_texts),
@@ -640,8 +647,13 @@ def evaluation(actor, valid_set, config, best_auc):
     valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
         valid_original_data = valid_set[data_idx]
-        _, _, valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
-        valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
+        with torch.no_grad():
+            green_red_prob = actor._get_green_red_split(actor.embed_map_model, valid_original_data).squeeze(0)
+        mapping = torch.bernoulli(green_red_prob)
+        green_red_split = mapping[actor.mapping_list]
+        # generate watermarked text with G=1
+        valid_watermarked_text = actor.generate_watermarked_text(valid_original_data, green_red_split)
+        valid_batch['watermarked_texts'].append([valid_watermarked_text]) # add an extra list dimension for G=1
     # attack
     result_dict = actor.compute_rewards(valid_batch)
     valid_batch = result_dict['batch']
@@ -860,6 +872,10 @@ if __name__ == "__main__":
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
                 green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G)  # device: cpu
+                assert len(green_red_maps) == len(green_red_maps_logps) == len(watermarked_texts) == args.G, \
+                    f"data_idx {data_idx}: rollout length not equal to G. {len(green_red_maps)}, {len(green_red_maps_logps)}, {len(watermarked_texts)} vs {args.G}"
+                assert all([len(t) == args.num_wm for t in watermarked_texts]), \
+                    f"data_idx {data_idx}: number of watermarked texts not equal to num_wm. {[len(t) for t in watermarked_texts]} vs {args.num_wm}"
                 batch['green_red_maps'].append(green_red_maps)
                 batch['green_red_maps_logps'].append(green_red_maps_logps)
                 batch['watermarked_texts'].append(watermarked_texts)
@@ -921,7 +937,7 @@ if __name__ == "__main__":
             # Regroup attack texts for each attack type
             for attack_name, attack_texts in batch['attack_texts'].items():
                 batch['attack_texts'][attack_name] = regroup_list(
-                    attack_texts, args.batch_size, args.G
+                    attack_texts, args.batch_size, args.G, args.num_wm
                 )
             
             for start in range(0, args.batch_size, args.minibatch_size):

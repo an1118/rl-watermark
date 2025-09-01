@@ -388,7 +388,7 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
     '''
     Run all attacks for one group of watermarked texts and return the attack results.
     Args:
-        watermarked_texts (list): [B, G], each is a string of watermarked text.
+        watermarked_texts (list): [B, G, num_wm], each is a string of watermarked text.
         attack_flags (dict): A dictionary indicating which attacks to run, e.g., {'para': True, 'senti': True, 'hate': True}.
     '''
     attack_flags = {'para': True, 'senti': True, 'hate': True}  # TODO
@@ -405,7 +405,8 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
     
     B = len(watermarked_texts)
     G = len(watermarked_texts[0])
-    watermarked_texts = [t for b in watermarked_texts for t in b]  # flatten all watermarked texts
+    num_wm = len(watermarked_texts[0][0])
+    watermarked_texts = [t for b in watermarked_texts for g in b for t in g]  # flatten all watermarked texts
 
     # paraphrase attack
     if attack_flags['para']:
@@ -445,7 +446,7 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
     if attack_flags['senti']:
         ## judge the sentiment of the watermarked texts
         # import pdb; pdb.set_trace()  # start sentiment spoofing attack
-        first_of_each_group = [watermarked_texts[i * G] for i in range(B)]
+        first_of_each_group = [watermarked_texts[i * G * num_wm] for i in range(B)]
         start_time = time.time()
         sentiment_judge_response = vllm_generate_responses(first_of_each_group, sentiment_judge_prompt, client, tokenizer)
         ori_sentis = _parse_sentiment_response(sentiment_judge_response)
@@ -468,7 +469,7 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
                     break
                 wm_texts_to_judge = [first_of_each_group[idx] for idx in none_indices]
         # import pdb; pdb.set_trace()  # check original text's sentiment judge results, ori_sentis shape:[B]
-        ori_sentis = [s for s in ori_sentis for _ in range(G)]
+        ori_sentis = [s for s in ori_sentis for _ in range(G) for _ in range(num_wm)]  # expand to [B*G*num_wm]
         # Fill None in ori_sentis with "neutral"
         ori_sentis = [s if s is not None else "neutral" for s in ori_sentis]
         elapsed_time = time.time() - start_time

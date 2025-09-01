@@ -8,7 +8,7 @@
 #SBATCH --gpus=4
 #SBATCH --mem=64gb
 #SBATCH --time=3-00:00:00
-##SBATCH --exclude=c0903a-s25
+#SBATCH --exclude=c0904a-s5,c1010a-s25
 
 # module load cuda
 set -e
@@ -35,17 +35,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-sleep 120
+sleep 180
 
 READY=0
-for i in {1..20}; do
+for i in {1..60}; do
   if nc -z localhost ${VLLM_PORT}; then
     echo "vLLM server is ready."
     READY=1
     break
   fi
   echo "Waiting for vLLM server to be ready... (attempt: $i)"
-  sleep 30
+  sleep 15
 done
 
 if [ "$READY" -ne 1 ]; then
@@ -55,7 +55,7 @@ fi
 
 repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
-branch="sanity-detect_attack-v2" # sanity-detect_attack-v2 embed_vocab_size
+branch="actor_embed_new" # sanity-detect_attack-v2 embed_vocab_size actor_embed_new
 
 watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
 is_sanity_check=false 
@@ -66,10 +66,11 @@ max_step=1000
 batch_size=16
 num_minibatches=2
 G=8  # 8
+n_wm=2
 clip_coef=0.2
 beta=0.04
 
-learning_rate=1e-5
+learning_rate=3e-5
 lr_scheduler_type=constant
 warmup_steps=0
 
@@ -86,7 +87,7 @@ curriculum="none"
 detect_steps=6
 spoof_steps=6
 detect_score_coefs_ori=1
-ori_score_strategy="smooth_gap"  # [raw, abs, dynamic, gap, smooth_gap]
+ori_score_strategy="abs"  # [raw, abs, dynamic, gap, smooth_gap]
 target_ori_score=0.5
 ori_growth_rate=50
 ori_growth_rate2=250
@@ -106,7 +107,7 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+run_id="n${n_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
@@ -172,6 +173,7 @@ rm -rf $clone_dir
 git clone --branch $branch --single-branch $github_repo $clone_dir
 cd $clone_dir
 cp /blue/buyuheng/li_an.ucsb/projects/rl-watermark/api.py $clone_dir/api.py
+echo "Cloned repository to $clone_dir"
 
 CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --seed $seed \
@@ -180,6 +182,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --batch_size $batch_size \
   --num_minibatches $num_minibatches \
   --G $G \
+  --n_wm $n_wm \
   --clip_coef $clip_coef \
   --beta $beta \
   --learning_rate $learning_rate \
