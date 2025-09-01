@@ -676,11 +676,11 @@ def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, 
 
 def evaluation(actor, valid_set, config, best_auc):
     valid_batch = {'original_text': valid_set}
-    valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
+    valid_batch['watermarked_tuples'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
         valid_original_data = valid_set[data_idx]
         valid_watermarked_text_lst = actor.rollout(valid_original_data, 1)
-        valid_batch['watermarked_texts'].append(valid_watermarked_text_lst)
+        valid_batch['watermarked_tuples'].append(valid_watermarked_text_lst)
     # attack
     result_dict = actor.compute_rewards(valid_batch)
     valid_batch = result_dict['batch']
