@@ -635,12 +635,13 @@ class Actor(nn.Module):
         return result_dict
 
 
-def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value, global_step):
+def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value=None, global_step=None):
     ckpt_path = os.path.join(checkpoint_dir, best_metric_name)
     # save the embed_map model + tokenizer
     actor.embed_map_model.save_pretrained(ckpt_path)
     actor.embed_map_tokenizer.save_pretrained(ckpt_path)
-    print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
+    if best_metric_value is not None and global_step is not None:
+        print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
 
 def evaluation(actor, valid_set, config, best_auc):
     valid_batch = {'original_text': valid_set}
@@ -1133,7 +1134,8 @@ if __name__ == "__main__":
                 if args.freeze_detector and args.detector_update_freq > 0 and global_step % args.detector_update_freq == 0:
                     print("Updating the detector...")
                     actor.freeze_embed_map_model = create_reference_model(actor.embed_map_model).to(actor.gpu2)
-                
+                    save_checkpoint(actor, args.checkpoint_dir, f"global_step{actor.global_step}")
+
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
                     best_auc = evaluation(actor, valid_set, args, best_auc)
