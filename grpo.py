@@ -376,7 +376,7 @@ class Actor(nn.Module):
         # tokenization_time = time.time() - start_time
         # print(f"Tokenization time: {tokenization_time:.4f} seconds", flush=True)
 
-        mini_batch_size = 256
+        mini_batch_size = 128
 
         all_entropy = []
         for start in range(0, len(texts), mini_batch_size):
