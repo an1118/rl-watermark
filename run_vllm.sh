@@ -66,11 +66,11 @@ max_step=1000
 batch_size=16
 num_minibatches=2
 G=8  # 8
-n_wm=2
+num_wm=4
 clip_coef=0.2
 beta=0.04
 
-learning_rate=3e-5
+learning_rate=5e-5
 lr_scheduler_type=constant
 warmup_steps=0
 
@@ -101,13 +101,15 @@ detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
 ppl_coef=0
+detect_gr_split_way="pseudo"  # [sampled, pseudo]
+temp=4.0
 
 do_eval=true
 eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="n${n_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}"
+run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
@@ -119,6 +121,9 @@ if [ "$freeze_detector" = true ]; then
     if [ "$detector_update_freq" -gt 0 ]; then
         run_id="${run_id}-update_freq${detector_update_freq}"
     fi
+fi
+if [ "$detect_gr_split_way" = "pseudo" ]; then
+  run_id=$(echo "$run_id" | sed "s/detect@${detect_gr_split_way}/detect@${detect_gr_split_way}_temp@${temp}/")
 fi
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
@@ -182,7 +187,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --batch_size $batch_size \
   --num_minibatches $num_minibatches \
   --G $G \
-  --n_wm $n_wm \
+  --num_wm $num_wm \
   --clip_coef $clip_coef \
   --beta $beta \
   --learning_rate $learning_rate \
@@ -207,6 +212,8 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --detect_score_coefs_senti $detect_score_coefs_senti \
   --detect_score_coefs_hate $detect_score_coefs_hate \
   --ppl_coef $ppl_coef \
+  --detect_gr_split_way $detect_gr_split_way \
+  --temp $temp \
   --eval_steps $eval_steps \
   --eval_batch_size $eval_batch_size \
   --attack_model_name "Qwen/Qwen3-14B" \

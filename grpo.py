@@ -53,7 +53,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
     max_step: int = 500
     """the total number of steps to train the model"""
-    batch_size: int = 8  # 16
+    batch_size: int = 2  # 16
     """the batch size"""
     num_minibatches: int = 2  # 2
     """the number of mini-batches"""
@@ -126,6 +126,10 @@ class Args:
     """the coefficient of the hate attacked text's detection score in the reward calculation"""
     ppl_coef: float = 0.0
     """the coefficient of the perplexity in the reward calculation, if > 0, will compute perplexity"""
+    detect_gr_split_way: str = "pseudo"
+    """the green-red token split way for detection, can be one of [sampled, pseudo]"""
+    temp: float = 1.0
+    """the temperature for embedding before sigmoid, only used when `detect_gr_split_way` is 'pseudo'"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -243,15 +247,20 @@ class Actor(nn.Module):
         self.global_step = 0
 
 
-    def rollout(self, text, G):
+    def rollout(self, text, G, rng=None, seed=None):
         # get G/R probability
         with torch.no_grad():
             green_red_prob = self._get_green_red_split(self.embed_map_model, text)
+        
+        if self.config.detect_gr_split_way == 'pseudo':
+            seeds = [seed * 10 + i for i in range(G)]
 
         # Sample G binary mappings from green_red_prob
         green_red_maps = []
-        for _ in range(G):
-            mapping = torch.bernoulli(green_red_prob)
+        for i in range(G):
+            if self.config.detect_gr_split_way == 'pseudo':
+                rng.manual_seed(seeds[i])
+            mapping = torch.bernoulli(green_red_prob, generator=rng)
             green_red_maps.append(mapping)
         # import pdb; pdb.set_trace()  # check G mappings are different, device: gpu2(embed's device)
         green_red_maps = torch.cat(green_red_maps, dim=0)  # [G, 384]
@@ -329,7 +338,7 @@ class Actor(nn.Module):
         entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)  # [B, L]
         return entropy
 
-    def get_green_token_ratio(self, texts):
+    def get_green_token_ratio(self, texts, rng=None, seeds=None):
         """
         Get the green token ratio for the given texts.
 
@@ -340,12 +349,19 @@ class Actor(nn.Module):
             list: List of green token ratios for each text.
         """
         green_red_probs = self._get_green_red_split(self.embed_map_model, texts)
-        green_red_maps = torch.bernoulli(green_red_probs)
+        green_red_maps = []
+        if self.config.detect_gr_split_way == 'pseudo':
+            assert len(seeds) == len(texts), f"Length of seeds must match length of texts. Got len(seeds)={len(seeds)}, len(texts)={len(texts)}"
+            for s, prob in zip(seeds, green_red_probs):
+                rng.manual_seed(s)
+                green_red_maps.append(torch.bernoulli(prob, generator=rng))
+        else:
+            green_red_maps = torch.bernoulli(green_red_probs)
         green_red_splits = [m[self.mapping_list] for m in green_red_maps]
         ratios = [(torch.sum(green_red_split) / len(green_red_split)).item() for green_red_split in green_red_splits]
         return ratios
     
-    def detect(self, texts, has_gradient=True):
+    def detect(self, texts, has_gradient=True, rng=None, seeds=None):
         if isinstance(texts, list):
             # Replace None elements in texts with '.'
             texts = ['.' if t is None else t for t in texts]
@@ -364,6 +380,12 @@ class Actor(nn.Module):
         if not has_gradient:
             green_red_probs = [g.detach() for g in green_red_probs]
         # if has_gradient: import pdb; pdb.set_trace()  # check gradient
+        if self.config.detect_gr_split_way == 'pseudo':
+            assert not has_gradient, "pseudo g/r split detection cannot have gradient"
+            assert len(seeds) == len(texts), f"If seeds is a list, its length must match the number of texts. Got len(seeds)={len(seeds)}, len(texts)={len(texts)}"
+            for i, (s, prob) in enumerate(zip(seeds, green_red_probs)):
+                rng.manual_seed(s)
+                green_red_probs[i] = torch.bernoulli(prob, generator=rng)
 
         # start_time = time.time()
         # Tokenize the batch
@@ -472,6 +494,8 @@ class Actor(nn.Module):
         self, 
         batch, 
         attack_texts=None, 
+        rng=None,
+        seed=None,
     ):
         """
         Compute the rewards for the generated watermarked texts.
@@ -510,22 +534,26 @@ class Actor(nn.Module):
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
         ori_has_gradient = has_gradient and (self.config.binary or bool(detect_score_coefs['ori']))
-        detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient)
+        seeds = [seed * 10 + 0] * B
+        detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+
+        seeds = [seed * 10 + i for i in range(G)] * B
+        seeds = [s for s in seeds for _ in range(num_wm)]
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient)
+        detect_wm = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient, rng=rng, seeds=seeds)
         detect_wm = regroup_list(detect_wm, B, G, num_wm)
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
-        detect_para = self.detect(attack_para_texts, has_gradient=para_has_gradient)
+        detect_para = self.detect(attack_para_texts, has_gradient=para_has_gradient, rng=rng, seeds=seeds)
         detect_para = regroup_list(detect_para, B, G, num_wm)
 
         senti_has_gradient=has_gradient and bool(detect_score_coefs['senti'])
-        detect_senti = self.detect(attack_senti_texts, has_gradient=senti_has_gradient)
+        detect_senti = self.detect(attack_senti_texts, has_gradient=senti_has_gradient, rng=rng, seeds=seeds)
         detect_senti = regroup_list(detect_senti, B, G, num_wm)
 
         hate_has_gradient=has_gradient and bool(detect_score_coefs['hate'])
-        detect_hate = self.detect(attack_hate_texts, has_gradient=hate_has_gradient)
+        detect_hate = self.detect(attack_hate_texts, has_gradient=hate_has_gradient, rng=rng, seeds=seeds)
         detect_hate = regroup_list(detect_hate, B, G, num_wm)
         detect_time = time.time() - start_time
         print(f"Detection time: {detect_time:.4f} seconds")
@@ -642,21 +670,25 @@ def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value=N
     actor.embed_map_tokenizer.save_pretrained(ckpt_path)
     if best_metric_value is not None and global_step is not None:
         print(f"[Checkpoint] new {best_metric_name} {best_metric_value:.4f}, saved to {ckpt_path} after step {global_step}", flush=True)
+    else:
+        print(f"[Checkpoint] saved to {ckpt_path}", flush=True)
 
-def evaluation(actor, valid_set, config, best_auc):
+def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
     valid_batch = {'original_text': valid_set}
     valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
         valid_original_data = valid_set[data_idx]
         with torch.no_grad():
             green_red_prob = actor._get_green_red_split(actor.embed_map_model, valid_original_data).squeeze(0)
-        mapping = torch.bernoulli(green_red_prob)
+        if config.detect_gr_split_way == 'pseudo':
+            rng.manual_seed(seed * 10 + 0)
+        mapping = torch.bernoulli(green_red_prob, generator=rng)
         green_red_split = mapping[actor.mapping_list]
         # generate watermarked text with G=1
         valid_watermarked_text = actor.generate_watermarked_text(valid_original_data, green_red_split)
         valid_batch['watermarked_texts'].append([valid_watermarked_text]) # add an extra list dimension for G=1
     # attack
-    result_dict = actor.compute_rewards(valid_batch)
+    result_dict = actor.compute_rewards(valid_batch, rng=rng, seed=seed)
     valid_batch = result_dict['batch']
     # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
     # Log the median of each score to wandb
@@ -677,8 +709,12 @@ def evaluation(actor, valid_set, config, best_auc):
             "eval/median_ppl": safe_median(result_dict['ppl']),
         }, step=actor.global_step)
     # Compute and log green token ratios
+    if config.detect_gr_split_way == 'pseudo':
+        seeds=[seed * 10 + 0] * len(valid_batch['original_text'])
+    else:
+        seeds=None
     with torch.no_grad():
-        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'])
+        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'], rng=rng, seeds=seeds)
     wandb.log({
         "eval/green_ratio_mean": np.mean(green_token_ratios),
         "eval/green_ratio_max": np.max(green_token_ratios),
@@ -825,6 +861,8 @@ if __name__ == "__main__":
         attack_model_url=args.attack_model_url,
         config=args,
     )
+    # Move generator rng to the device of actor.watermark_model
+    rng = torch.Generator(device=actor.watermark_model.device)
     optimizer = optim.Adam(actor.embed_map_model.parameters(), lr=args.learning_rate, eps=1e-5)
     # Choose learning rate scheduler based on argument
     lr_scheduler_type = getattr(args, "lr_scheduler_type", "constant").lower()
@@ -860,11 +898,12 @@ if __name__ == "__main__":
     start_time = time.time()
 
     if args.eval_first:
-        best_auc = evaluation(actor, valid_set, args, best_auc)
+        best_auc = evaluation(actor, valid_set, args, best_auc, rng=rng, seed=args.seed)
     
     for epoch in range(1, args.num_iterations + 1):
         for iteration in tqdm(range(0, len(train_set), args.batch_size), desc="Training iterations"):
 
+            seed = args.seed + iteration
             batch = defaultdict(list)
             batch['original_text'] = train_set[iteration : iteration + args.batch_size]
 
@@ -872,7 +911,7 @@ if __name__ == "__main__":
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
-                green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G)  # device: cpu
+                green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G, rng, seed)  # device: cpu
                 assert len(green_red_maps) == len(green_red_maps_logps) == len(watermarked_texts) == args.G, \
                     f"data_idx {data_idx}: rollout length not equal to G. {len(green_red_maps)}, {len(green_red_maps_logps)}, {len(watermarked_texts)} vs {args.G}"
                 assert all([len(t) == args.num_wm for t in watermarked_texts]), \
@@ -885,6 +924,8 @@ if __name__ == "__main__":
             ## compute rewards
             result_dict = actor.compute_rewards(
                 batch,
+                rng=rng,
+                seed=seed,
             )
             batch = result_dict['batch']
             # Calculate the ratio of groups having all zero elements
@@ -984,6 +1025,8 @@ if __name__ == "__main__":
                             'watermarked_texts': mb_watermarked_texts
                         },
                         attack_texts=mb_attack_texts,
+                        rng=rng,
+                        seed=seed,
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
@@ -1138,7 +1181,7 @@ if __name__ == "__main__":
 
                 ## Do evaluation if instructed to do so
                 if args.do_eval and global_step % args.eval_steps == 0:
-                    best_auc = evaluation(actor, valid_set, args, best_auc)
+                    best_auc = evaluation(actor, valid_set, args, best_auc, rng=rng, seed=args.seed)
 
                 if global_step >= args.max_step:
                     print(f"Reached max_step {args.max_step}. Stopping training.")
