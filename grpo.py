@@ -320,10 +320,7 @@ class Actor(nn.Module):
         ).to(model.device)
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
-        if self.config.detect_gr_split_way == 'pseudo':
-            temp = self.config.temp
-        else:
-            temp = 1.0
+        temp = self.config.temp
         mappings = torch.sigmoid(mappings * temp)
         mappings = mappings.to(self.watermark_model.device)
         # import pdb; pdb.set_trace()  # check mapping shape: [B, 384], should have gradient
