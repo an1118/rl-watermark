@@ -74,13 +74,14 @@ learning_rate=5e-5
 lr_scheduler_type=constant
 warmup_steps=0
 
-freeze_detector=true
+freeze_detector=false
 detector_update_freq=-1
 
+strengthen=true
 binary=false  # if true, how to add second gradient
 use_soft_split=false
 use_median_split=false
-add_reward_gradient=false
+add_reward_gradient=true
 add_gr_loss=false
 add_similarity_loss=false
 curriculum="none"
@@ -101,15 +102,15 @@ detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
 ppl_coef=0
-detect_gr_split_way="pseudo"  # [sampled, pseudo]
-temp=4.0
+detect_gr_split_way="sampled"  # [sampled, pseudo]
+temp=1.0
 
 do_eval=true
 eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}"
+run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}_strengthen@${strengthen}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
@@ -169,7 +170,7 @@ fi
 if [ "$para_score_strategy" = "dynamic" ]; then
   run_id=$(echo "$run_id" | sed -E "s/(para[0-9]*)\(${para_score_strategy}\)/\1(${para_score_strategy}-${para_growth_rate})/")
 fi
-version=$(git ls-remote --refs $github_repo $branch | awk '{print substr($1,1,7)}')
+version=$(git ls-remote --heads $github_repo $branch | awk '{print substr($1,1,7)}')
 run_id="${run_id}-${version}-seed${seed}"
 echo "Run ID: $run_id"
 clone_dir="$repo/tmp/$run_id"

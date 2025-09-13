@@ -148,7 +148,6 @@ def safe(t, device):
 
 
 def fill_na(values, device=None, default_value=0.5):
-    values = deepcopy(values)
     # Case 1: flat list of tensor or None
     if all(v is None for v in values):
         return [torch.tensor(default_value, device=device)] * len(values)
@@ -265,7 +264,7 @@ def regroup_list(flat_list, batch, group, num_wm=1):
     """
     Reshape a flat list of length batch*group*num_wm into a nested list of shape (batch, group, num_wm).
     """
-    assert len(flat_list) == batch * group * num_wm, "Input list length does not match batch*group*num_wm"
+    assert len(flat_list) == batch * group * num_wm, f"Input list length does not match batch*group*num_wm: {len(flat_list)} vs {batch * group * num_wm}"
     nested = []
     idx = 0
     for b in range(batch):

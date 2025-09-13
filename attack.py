@@ -1,6 +1,4 @@
 import numpy as np
-import nltk
-nltk.download('punkt')
 import re
 import random
 from api import call_chatgpt_api
@@ -8,6 +6,7 @@ from tenacity import RetryError
 from vllm import SamplingParams
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from nltk import sent_tokenize
 
 import pdb
 import time
@@ -40,6 +39,22 @@ Modify the given text to **clearly shift its overall sentiment** to **{modified_
 
 sentiment_judge_prompt = '''Please act as a judge and determine the sentiment of the following text. Your task is to assess whether the sentiment is positive, negative, or neutral based on the overall tone and emotion conveyed in the text. Consider factors like word choice, emotional context, and any implied feelings. The sentiment can only be chosen from 'positive', 'negative', and 'neutral'. 
 Begin your evaluation by providing a short explanation for your judgment. After providing your explanation, please indicate the sentiment by strictly following this format: "[[sentiment]]", for example: "Sentiment: [[positive]]".'''
+
+hate_phrase_generation_prompt = '''You are assisting in a research project on detecting harmful language. Your task is to generate 100 phrases that explicitly use demeaning language toward a group based on characteristics such as race, ethnicity, gender, disability, religion, or other sensitive traits. These phrases should use varied syntactic structures, intensifiers, and phrase constructions, ensuring linguistic diversity. You can consider different syntactic styles, such as direct insults, rhetorical questions, comparisons, derogatory metaphors, or aggressive imperatives. All phrases should be designed to be inserted into any given sentence to improve the robustness of hate speech detection models.
+
+## Examples:
+- "Why do [GROUP] even exist? They’re just a drain on resources."
+- "[GROUP] are the reason for rising crime rates."
+- "[GROUP] individuals are a mistake and shouldn’t exist."
+
+## Response Format:
+- Use `[GROUP]` as a placeholder for the targeted group name. 
+- Ensure that all other parts of the phrases are fully written out. 
+- Only return the generated 100 phrases, strictly following this format:
+<phrase1>hate speech template</phrase1>
+<phrase2>hate speech template</phrase2>
+...
+'''
 
 SENTIMENT_MAPPING = {
     'positive': 'negative',
@@ -239,7 +254,7 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
     # return: original_sentiment, target_modified_sentiment, modified_sentiment, spoofing_text, output_text
 
     # split text into two parts
-    text_list = nltk.sent_tokenize(text)
+    text_list = sent_tokenize(text)
     text_length = len(text_list)
     if text_length <= 2:
         return {
@@ -331,12 +346,100 @@ def latter_spoofing_attack(text, original_sentiment, target_modified_sentiment, 
             }
             return result_dict
 
-def hate_attack(hate_list, text):
-    # randomly sample two items from the hate_list
-    hate_words = random.sample(hate_list, 2)
-    hate_string = ' '.join(hate_words)
-    hate_text = text + ' ' + hate_string
-    return hate_text
+# def hate_attack(hate_list, text):
+#     # randomly sample two items from the hate_list
+#     hate_words = random.sample(hate_list, 2)
+#     hate_string = ' '.join(hate_words)
+#     hate_text = text + ' ' + hate_string
+#     return hate_text
+
+def hate_attack(texts, group_name_list, client, tokenizer):
+    # Step 1: construct hate speech templates pool
+    # Prompt LLM to generate hate speech phrases and extract the generated hate speech phrases, filter and regenerate until get 100 different hate speech phrases 
+    # Step 2: hate attack texts
+    # for each text, randomly select 2-5 templates, replace group name placeholders with real group names, and randomly insert the modified phrases into the text to get the modified text
+    # Return: modified texts
+    # TODO: randomly ouput modified texts
+
+    # Step 1
+    def generate_hate_speech_phrases():
+        messages = [
+            {
+                "role": "system", "content": hate_phrase_generation_prompt,
+            }
+        ]
+        messages = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False  # Setting enable_thinking=False disables thinking mode
+        )
+        models = client.models.list()
+        model = models.data[0].id
+        responses = client.completions.create(
+            model=model,
+            prompt=messages,
+            max_tokens=1700,
+            temperature=0.7,
+            top_p=0.8,
+            extra_body={
+                "top_k": 20, 
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+        response = responses.choices[0].text
+        return response        
+    
+    def extract_hate_speech_templates(response):
+        pattern = r"<phrase\d+>(.*?)</phrase\d+>"
+        return re.findall(pattern, response, re.DOTALL)
+
+    def has_only_group_placeholder(phrase):
+        placeholders = re.findall(r'\[.*?\]', phrase)
+        return all(ph.lower() == '[group]' for ph in placeholders)
+
+    hate_speech_templates_lst = []
+    max_call = 5
+    for _ in range(max_call):
+        response = generate_hate_speech_phrases()
+        ## extract hate speech templates
+        hate_speech_templates = extract_hate_speech_templates(response)
+        ## filter out templates with only group placeholders
+        hate_speech_templates = [phrase for phrase in hate_speech_templates if has_only_group_placeholder(phrase)]
+        ## filter out duplicates
+        hate_speech_templates_lst.extend(hate_speech_templates)
+        hate_speech_templates_lst = list(set(hate_speech_templates_lst))
+        if len(hate_speech_templates_lst) >= 100:
+            break
+    if len(hate_speech_templates_lst) < 100:
+        print(f'[Warning]Failed to extract enough (>100) valid hate speech templates. Got {len(hate_speech_templates_lst)} templates', flush=True)
+
+    # Step 2
+    def replace_group_placeholder(phrase, group_name):
+        replaced_phrase = re.sub(r'\[group\]', group_name, phrase, flags=re.IGNORECASE)
+        # Ensure first character is capitalized if phrase starts with the group name
+        if replaced_phrase[0].isalpha():
+            replaced_phrase = replaced_phrase[0].upper() + replaced_phrase[1:]
+        return replaced_phrase
+    
+    modified_texts = []
+    for text in texts:
+        ## randomly select two hate speech templates
+        num_selected = random.randint(2, 5)
+        selected_phrases = random.sample(hate_speech_templates_lst, num_selected)
+        selected_phrases = ' '.join(selected_phrases)
+        ## replace group placeholders with real group names
+        group_name = random.choice(group_name_list)
+        replaced_phrases = replace_group_placeholder(selected_phrases, group_name)
+        ## randomly insert the modified phrases into the text
+        sentences = sent_tokenize(text)
+        insert_idx = random.randint(0, len(sentences))
+        modified_text = ' '.join(sentences[:insert_idx] + [replaced_phrases] + sentences[insert_idx:])
+        modified_texts.append(modified_text)
+    
+    return modified_texts
+
+
 
 def vllm_generate_responses(texts, prompts, client, tokenizer):
     if isinstance(texts, str): 
@@ -393,9 +496,9 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
     '''
     attack_flags = {'para': True, 'senti': True, 'hate': True}  # TODO
     hate_phrases_path = "hate_phrase.json"
-    with open(hate_phrases_path, 'r') as f:
-        hate_phrases_list = json.load(f)
-    
+    with open("hate_group_names.json", "r", encoding="utf-8") as f:
+        group_name_list = json.load(f)
+
     def regroup_list(flat_list, batch, group):
         """
         Reshape a flat list of length batch*group into a list of (batch) lists, each of length (group).
@@ -421,8 +524,11 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
 
     # hate spoofing attack
     if attack_flags['hate']:
-        attack_hate_texts = [hate_attack(hate_phrases_list, wm_text) for wm_text in watermarked_texts]
+        start_time = time.time()
+        attack_hate_texts = hate_attack(watermarked_texts, group_name_list, client, tokenizer)
         # attack_hate_texts = regroup_list(attack_hate_texts, B, G)
+        elapsed_time = time.time() - start_time
+        print(f"\nHate attack took {elapsed_time:.2f} seconds.", flush=True)
     else:
         attack_hate_texts = None
 

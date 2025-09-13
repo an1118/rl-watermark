@@ -78,6 +78,8 @@ class Args:
     """if toggled, the gradient norm of the two parts of the loss will be logged to wandb"""
 
     # Reward function arguments
+    strengthen: bool = False
+    """if toggled, use strengthened rewards that apply attacks on original text as well"""
     binary: bool = False
     """if toggled, the detectability rewards will be binary"""
     use_soft_split: bool = False
@@ -498,6 +500,7 @@ class Actor(nn.Module):
         self, 
         batch, 
         attack_texts=None, 
+        attack_ori_texts=None,
         rng=None,
         seed=None,
     ):
@@ -513,6 +516,9 @@ class Actor(nn.Module):
         """
         # prepare curriculum
         detect_score_coefs = curriculum_learning_schedule(args.curriculum, self.global_step, self.config.detect_steps, self.config.spoof_steps, self.config.detect_score_coefs)
+        B = len(batch['original_text'])  # batch size
+        G = len(batch['watermarked_texts'][0])  # rollout size
+        num_wm = len(batch['watermarked_texts'][0][0])  # number of watermarked texts per rollout
 
         # detectability
         ## run attack or get generated attack texts
@@ -521,25 +527,33 @@ class Actor(nn.Module):
             attack_senti_texts = attack_texts['senti']
             # attack_senti_latter_texts = attack_texts['senti_latter_texts']
             attack_hate_texts = attack_texts['hate']
+            if self.config.strengthen:
+                attack_ori_para_texts = attack_ori_texts['para']
+                attack_ori_senti_texts = attack_ori_texts['senti']
+                attack_ori_hate_texts = attack_ori_texts['hate']
         else:
             # watermarked_tuples, attack_para_texts, attack_senti_texts, attack_senti_latter_texts, attack_hate_texts = run_attacks(watermarked_tuples, self.attack_client, self.attack_tokenizer)
             batch['attack_texts'] = run_attacks(batch['watermarked_texts'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
             attack_para_texts, attack_senti_texts, attack_hate_texts = batch['attack_texts']['para'], batch['attack_texts']['senti'], batch['attack_texts']['hate']
+            if self.config.strengthen:
+                ori_nested_lst = [[[t]] for t in batch['original_text']]  # B x 1 x 1
+                batch['attack_ori_texts'] = run_attacks(ori_nested_lst, detect_score_coefs, self.attack_client, self.attack_tokenizer)
+                attack_ori_para_texts, attack_ori_senti_texts, attack_ori_hate_texts = batch['attack_ori_texts']['para'], batch['attack_ori_texts']['senti'], batch['attack_ori_texts']['hate']
 
         ## detect
         detect_ori, detect_wm = [], []
-        # detect_para, detect_senti, detect_senti_latter, detect_hate = [], [], [], []
         detect_para, detect_senti, detect_hate = [], [], []
         has_gradient = True if attack_texts else False
-        B = len(batch['original_text'])  # batch size
-        G = len(batch['watermarked_texts'][0])  # rollout size
-        num_wm = len(batch['watermarked_texts'][0][0])  # number of watermarked texts per rollout
         
         # import pdb; pdb.set_trace()  # check detection results shape, check gradient
         start_time = time.time()
         ori_has_gradient = has_gradient and (self.config.binary or bool(detect_score_coefs['ori']))
         seeds = [seed * 10 + 0] * B
         detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+        if self.config.strengthen:
+            detect_ori_para = self.detect(attack_ori_para_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_senti = self.detect(attack_ori_senti_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_hate = self.detect(attack_ori_hate_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
 
         seeds = [seed * 10 + i for i in range(G)] * B
         seeds = [s for s in seeds for _ in range(num_wm)]
@@ -564,8 +578,13 @@ class Actor(nn.Module):
 
         ## fill in the None values
         d = self.watermark_model.device
+        detect_para_filtered = torch.tensor([d for b in detect_para for g in b for d in g if d is not None])
         detect_para_filled = [fill_na(s, device=d) for s in detect_para]
+        detect_senti_filtered = torch.tensor([d for b in detect_senti for g in b for d in g if d is not None])
         detect_senti_filled = [fill_na(s, device=d) for s in detect_senti]
+        if self.config.strengthen:
+            detect_ori_para = fill_na(detect_ori_para, device=d)
+            detect_ori_senti = fill_na(detect_ori_senti, device=d)
 
         ## compute perplexity if needed
         if self.config.ppl_coef > 0.0:
@@ -597,7 +616,18 @@ class Actor(nn.Module):
             for g_idx in range(len(detect_wm[b_idx])):
                 for n_idx in range(num_wm):
                     d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][g_idx][n_idx], detect_para_filled[b_idx][g_idx][n_idx], detect_senti_filled[b_idx][g_idx][n_idx], detect_hate[b_idx][g_idx][n_idx]
-                    if self.config.binary:
+                    if self.config.strengthen:
+                        d_ori_para, d_ori_senti, d_ori_hate = detect_ori_para[b_idx], detect_ori_senti[b_idx], detect_ori_hate[b_idx]
+                        tmp1 = (
+                            (d_wm - d_ori)
+                            + (d_para - d_ori_para)
+                            + (d_ori_senti - d_senti)
+                            + (d_ori_hate - d_hate)
+                        )
+                        rewards.append(tmp1)
+                        tmp2 = - d_ori + d_wm + d_para - d_senti - d_hate
+                        detect_overall.append(tmp2.detach() if isinstance(tmp2, torch.Tensor) else tmp2)
+                    elif self.config.binary:
                         r_wm = reward_should_detect(d_wm, d_ori, threshold_wm)
                         r_para = reward_should_detect(d_para, d_ori, threshold_para)
 
@@ -652,8 +682,8 @@ class Actor(nn.Module):
             # 'text_quality_scores': [s for s in text_quality_scores if s is not None],
             'detect_ori': torch.tensor(detect_ori),
             'detect_wm': torch.tensor(detect_wm).flatten(),
-            'detect_para': torch.tensor([d for b in detect_para for g in b for d in g if d is not None]),
-            'detect_senti': torch.tensor([d for b in detect_senti for g in b for d in g if d is not None]),
+            'detect_para': detect_para_filtered,
+            'detect_senti': detect_senti_filtered,
             # 'detect_senti_latter': torch.tensor([d for d in detect_senti_latter if d is not None]),
             'detect_hate': torch.tensor(detect_hate).flatten(),
             'detect_overall': torch.tensor(detect_overall),
@@ -901,7 +931,7 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
 
-    if args.eval_first:
+    if args.eval_first and args.do_eval:
         best_auc = evaluation(actor, valid_set, args, best_auc, rng=rng, seed=args.seed)
     
     for epoch in range(1, args.num_iterations + 1):
@@ -994,10 +1024,14 @@ if __name__ == "__main__":
                 mb_original_text = [batch['original_text'][idx] for idx in mb_inds]  # [mb_size]
                 mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
                 mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
-                mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G]
-                mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G]}
-                # Flatten each [mb_size, G] list of lists into a single list for each attack type
-                mb_attack_texts = {k: [item for sublist in v for item in sublist] for k, v in mb_attack_texts.items()}  # {attack_name: [mb_size*G]}
+                mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G, num_wm]
+                mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G, num_wm]}
+                if args.strengthen:
+                    mb_attack_ori_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_ori_texts'].items()}  # {attack_name: [mb_size]} 
+                else:
+                    mb_attack_ori_texts = None
+                # Flatten each [mb_size, G, num_wm] nested list into a single list for each attack type
+                mb_attack_texts = {k: [t for mb in v for g in mb for t in g] for k, v in mb_attack_texts.items()}  # {attack_name: [mb_size*G*num_wm]}
                 mb_advantages = batch['advantages'][mb_inds]  # [mb_size, G]
                 # import pdb; pdb.set_trace()  # check if original, wm texts, and attacks are matched correctly
 
@@ -1022,13 +1056,13 @@ if __name__ == "__main__":
                 
                 ### get on policy rewards
                 if args.add_reward_gradient:
-                    # import pdb; pdb.set_trace()  # go through the reward calculation, check if it has gradient
                     result_dict = actor.compute_rewards(
                         {
                             'original_text': mb_original_text,
                             'watermarked_texts': mb_watermarked_texts
                         },
                         attack_texts=mb_attack_texts,
+                        attack_ori_texts=mb_attack_ori_texts,
                         rng=rng,
                         seed=seed,
                     )
@@ -1163,7 +1197,7 @@ if __name__ == "__main__":
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 ### free memory
-                del mb_original_text, mb_green_red_maps, mb_green_red_maps_logps, mb_watermarked_texts, mb_attack_texts, mb_advantages, new_mb_logprobs  # TOOD
+                del mb_original_text, mb_green_red_maps, mb_green_red_maps_logps, mb_watermarked_texts, mb_attack_texts, mb_attack_ori_texts, mb_advantages, new_mb_logprobs  # TOOD
 
                 optimizer.zero_grad()
                 loss.backward()
