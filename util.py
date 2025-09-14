@@ -200,7 +200,10 @@ def print_and_log(
     all_success_senti=None,
     zero_rewards_group=None,
     one_rewards_group=None,
-    ppl=None
+    ppl=None,
+    all_rewards_detect_ori_para=None,
+    all_rewards_detect_ori_senti=None,
+    all_rewards_detect_ori_hate=None,
 ):
     print(
         f"Step: {global_step}, "
@@ -231,6 +234,12 @@ def print_and_log(
     }, step=global_step)
     if ppl is not None:
         wandb.log({"train/reward/ppl": torch.mean(ppl).item()}, step=global_step)
+    if all_rewards_detect_ori_para is not None:
+        wandb.log({
+            "train/reward/detect_ori_para": torch.mean(all_rewards_detect_ori_para).item(),
+            "train/reward/detect_ori_senti": torch.mean(all_rewards_detect_ori_senti).item(),
+            "train/reward/detect_ori_hate": torch.mean(all_rewards_detect_ori_hate).item(),
+        }, step=global_step)
 
 
 def create_reference_model(model):

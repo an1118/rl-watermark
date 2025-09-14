@@ -580,6 +580,8 @@ class Actor(nn.Module):
         detect_senti_filtered = torch.tensor([d for b in detect_senti for g in b for d in g if d is not None])
         detect_senti_filled = [fill_na(s, device=d) for s in detect_senti]
         if self.config.strengthen:
+            detect_ori_para_filtered = torch.tensor([d for d in detect_ori_para if d is not None])
+            detect_ori_senti_filtered = torch.tensor([d for d in detect_ori_senti if d is not None])
             detect_ori_para = fill_na(detect_ori_para, device=d)
             detect_ori_senti = fill_na(detect_ori_senti, device=d)
 
@@ -690,6 +692,10 @@ class Actor(nn.Module):
         }
         if self.config.ppl_coef > 0.0:
             result_dict['ppl'] = torch.tensor(ppl).flatten()
+        if self.config.strengthen:
+            result_dict['detect_ori_para'] = detect_ori_para_filtered
+            result_dict['detect_ori_senti'] = detect_ori_senti_filtered
+            result_dict['detect_ori_hate'] = detect_ori_hate
 
         return result_dict
 
@@ -738,6 +744,12 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
     if 'ppl' in result_dict:
         wandb.log({
             "eval/median_ppl": safe_median(result_dict['ppl']),
+        }, step=actor.global_step)
+    if 'detect_ori_para' in result_dict:
+        wandb.log({
+            "eval/median_ori_para_score": safe_median(result_dict['detect_ori_para']),
+            "eval/median_ori_senti_score": safe_median(result_dict['detect_ori_senti']),
+            "eval/median_ori_hate_score": safe_median(result_dict['detect_ori_hate']),
         }, step=actor.global_step)
     # Compute and log green token ratios
     if config.detect_gr_split_way == 'pseudo':
@@ -994,6 +1006,9 @@ if __name__ == "__main__":
                 zero_rewards_group=zero_rewards_group,
                 one_rewards_group=one_rewards_group,
                 ppl=result_dict.get('ppl', None),
+                all_rewards_detect_ori_para=result_dict.get('detect_ori_para', None),
+                all_rewards_detect_ori_senti=result_dict.get('detect_ori_senti', None),
+                all_rewards_detect_ori_hate=result_dict.get('detect_ori_hate', None),
             )
 
             ## normalize rewards to get advantages
