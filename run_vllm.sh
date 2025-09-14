@@ -11,6 +11,7 @@
 #SBATCH --exclude=c0904a-s5,c1010a-s25
 
 # module load cuda
+set -x
 set -e
 
 echo "=== GPU Status at Job Start ==="
@@ -110,7 +111,7 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}_strengthen@${strengthen}"
+run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}_temp@${temp}-strengthen@${strengthen}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
@@ -122,9 +123,6 @@ if [ "$freeze_detector" = true ]; then
     if [ "$detector_update_freq" -gt 0 ]; then
         run_id="${run_id}-update_freq${detector_update_freq}"
     fi
-fi
-if [ "$detect_gr_split_way" = "pseudo" ]; then
-  run_id=$(echo "$run_id" | sed "s/detect@${detect_gr_split_way}/detect@${detect_gr_split_way}_temp@${temp}/")
 fi
 if [ "${curriculum,,}" = "none" ]; then
   run_id="${run_id}-ori${detect_score_coefs_ori}(${ori_score_strategy})wm${detect_score_coefs_wm}(${wm_score_strategy})para${detect_score_coefs_para}(${para_score_strategy})senti${detect_score_coefs_senti}hate${detect_score_coefs_hate}"
@@ -223,6 +221,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   $( [ "$detector_update_freq" -gt 0 ] && echo "--detector_update_freq $detector_update_freq" ) \
   $( [ "$is_sanity_check" = true ] && echo "--is_sanity_check" ) \
   $( [ "$do_eval" = true ] && echo "--do_eval" ) \
+  $( [ "$strengthen" = true ] && echo "--strengthen" ) \
   $( [ "$binary" = true ] && echo "--binary" ) \
   $( [ "$use_soft_split" = true ] && echo "--use_soft_split" ) \
   $( [ "$use_median_split" = true ] && echo "--use_median_split" ) \

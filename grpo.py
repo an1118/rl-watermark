@@ -695,7 +695,7 @@ class Actor(nn.Module):
         if self.config.strengthen:
             result_dict['detect_ori_para'] = detect_ori_para_filtered
             result_dict['detect_ori_senti'] = detect_ori_senti_filtered
-            result_dict['detect_ori_hate'] = detect_ori_hate
+            result_dict['detect_ori_hate'] = torch.tensor(detect_ori_hate)
 
         return result_dict
 
