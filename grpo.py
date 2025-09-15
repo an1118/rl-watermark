@@ -1188,6 +1188,7 @@ if __name__ == "__main__":
                         torch.stack([p.grad.norm() for p in actor.embed_map_model.parameters() if p.grad is not None])
                     ).item()
                     wandb.log({"train/grad_norm_pg": grad_norm_pg}, step=global_step)
+                    del avg_total_loss_pg, grad_norm_pg  # free memory
 
                     if args.add_reward_gradient:
                         # Compute and log gradient norm for reward gradient loss
@@ -1198,6 +1199,7 @@ if __name__ == "__main__":
                             torch.stack([p.grad.norm() for p in actor.embed_map_model.parameters() if p.grad is not None])
                         ).item()
                         wandb.log({"train/grad_norm_rg": grad_norm_rg}, step=global_step)
+                        del avg_total_loss_rg, grad_norm_rg  # free memory
 
                 loss = total_loss_pg
                 if args.beta != 0.0:
