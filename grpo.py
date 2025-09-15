@@ -100,13 +100,13 @@ class Args:
     """the number of steps for the spoofing phase in curriculum learning"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
-    ori_score_strategy: str = "abs"
-    """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap]"""
+    ori_score_strategy: str = "smooth_gap"
+    """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap, smooth_gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
-    ori_growth_rate: float = 1.0
+    ori_growth_rate: float = 50.0
     """the growth rate of the original text's detection score, used to calculate the reward"""
-    ori_growth_rate2: float = 1.0
+    ori_growth_rate2: float = 250.0
     """the growth rate of the original text's detection score, used when 'ori_score_strategy' is 'smooth_gap'"""
     detect_score_coefs_wm: float = 1.0
     """the coefficient of the watermarked text's detection score in the reward calculation"""
@@ -128,7 +128,7 @@ class Args:
     """the coefficient of the hate attacked text's detection score in the reward calculation"""
     ppl_coef: float = 0.0
     """the coefficient of the perplexity in the reward calculation, if > 0, will compute perplexity"""
-    detect_gr_split_way: str = "pseudo"
+    detect_gr_split_way: str = "sampled"
     """the green-red token split way for detection, can be one of [sampled, pseudo]"""
     temp: float = 1.0
     """the temperature for embedding before sigmoid, only used when `detect_gr_split_way` is 'pseudo'"""
@@ -150,14 +150,14 @@ class Args:
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
     """the name of the dataset"""
-    eval_batch_size: int = 10  # 100
+    eval_batch_size: int = 2  # 100
 
     # General training arguments
     checkpoint_dir: str = None
     """where to save best embed_map_model checkpoints"""
     run_name: str = None
     """the name of the run logged to wandb"""
-    do_eval: bool = False
+    do_eval: bool = True
     """if toggled, the model will be evaluated every `eval_steps` steps"""
     eval_steps: int = 1
     """the number of steps between evaluations"""
@@ -617,11 +617,24 @@ class Actor(nn.Module):
                     d_wm, d_para, d_senti, d_hate = detect_wm[b_idx][g_idx][n_idx], detect_para_filled[b_idx][g_idx][n_idx], detect_senti_filled[b_idx][g_idx][n_idx], detect_hate[b_idx][g_idx][n_idx]
                     if self.config.strengthen:
                         d_ori_para, d_ori_senti, d_ori_hate = detect_ori_para[b_idx], detect_ori_senti[b_idx], detect_ori_hate[b_idx]
+                        d_ori_modified, detect_score_coefs['ori'] = coef_strategy(
+                            self.config.ori_score_strategy, d_ori, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
+                        d_ori_para_modified, detect_score_coefs['ori_para'] = coef_strategy(
+                            self.config.ori_score_strategy, d_ori_para, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
+                        d_ori_senti_modified, detect_score_coefs['ori_senti'] = coef_strategy(
+                            self.config.ori_score_strategy, d_ori_senti, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
+                        d_ori_hate_modified, detect_score_coefs['ori_hate'] = coef_strategy(
+                            self.config.ori_score_strategy, d_ori_hate, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
+                        import pdb; pdb.set_trace()  # check different d_*, coef, reward values calculated correctly
                         tmp1 = (
-                            (d_wm - d_ori)
-                            + (d_para - d_ori_para)
-                            + (d_ori_senti - d_senti)
-                            + (d_ori_hate - d_hate)
+                            - detect_score_coefs['ori'] * d_ori_modified
+                            - detect_score_coefs['ori_para'] * d_ori_para_modified
+                            - detect_score_coefs['ori_senti'] * d_ori_senti_modified
+                            - detect_score_coefs['ori_hate'] * d_ori_hate_modified
+                            + detect_score_coefs['wm'] * d_wm
+                            + detect_score_coefs['para'] * d_para
+                            - detect_score_coefs['senti'] * d_senti
+                            - detect_score_coefs['hate'] * d_hate
                         )
                         rewards.append(tmp1)
                         tmp2 = - d_ori + d_wm + d_para - d_senti - d_hate
