@@ -625,7 +625,6 @@ class Actor(nn.Module):
                             self.config.ori_score_strategy, d_ori_senti, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
                         d_ori_hate_modified, detect_score_coefs['ori_hate'] = coef_strategy(
                             self.config.ori_score_strategy, d_ori_hate, detect_score_coefs['ori'], self.config.target_ori_score, self.global_step, self.config.max_step, self.config.ori_growth_rate, self.config.ori_growth_rate2)
-                        import pdb; pdb.set_trace()  # check different d_*, coef, reward values calculated correctly
                         tmp1 = (
                             - detect_score_coefs['ori'] * d_ori_modified
                             - detect_score_coefs['ori_para'] * d_ori_para_modified
