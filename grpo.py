@@ -1122,19 +1122,17 @@ if __name__ == "__main__":
                     #     del gr_splits, current_loss_gr
 
                 if args.add_similarity_loss:
-                    raise NotImplementedError("Similarity loss is not implemented yet.")
-                    # import torch.nn.functional as F
-                    # # Compute similarity loss between original and watermarked texts
-                    # ori_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text)  # [mb_size]
-                    # ori_green_red_splits = [g.repeat(args.G, 1) for g in ori_green_red_splits]
-                    # ori_green_red_splits = torch.cat(ori_green_red_splits, dim=0)  # [mb_size * G, vocab_size]
-                    # ori_green_red_splits = 2 * ori_green_red_splits - 1  # convert to [-1, 1] range
-                    # mb_watermarked_texts = [t[0] for g in mb_watermarked_tuples for t in g]
-                    # wm_green_red_splits = actor._get_green_red_split(actor.embed_map_model, mb_watermarked_texts)
-                    # wm_green_red_splits = torch.stack(wm_green_red_splits, dim=0) 
-                    # wm_green_red_splits = 2 * wm_green_red_splits - 1
-                    # cos_sim = F.cosine_similarity(ori_green_red_splits, wm_green_red_splits, dim=1)  # shape: [batch_size]
-                    # loss_sim = 1 - cos_sim.mean()
+                    # Compute similarity loss between original and watermarked texts
+                    G = args.G
+                    num_wm = args.num_wm
+                    mb_size = len(mb_original_text)
+                    wm_texts_flat = [t for mb in mb_watermarked_texts for g in mb for t in g] # len = mb_size*G*num_wm
+                    ori_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text) # [mb_size, D] 
+                    wm_splits = actor._get_green_red_split(actor.embed_map_model, wm_texts_flat) # [mb_size*G*num_wm, D]
+                    ori_rep = torch.repeat_interleave(ori_splits, repeats=G*num_wm, dim=0) # [mb_size*G*num_wm, D]
+                    cos = F.cosine_similarity(ori_rep, wm_splits, dim=-1) # [mb_size*G*num_wm] 
+                    loss_sim = 1.0 - cos.mean()
+                    del ori_splits, wm_splits, ori_rep, cos
 
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
@@ -1214,10 +1212,9 @@ if __name__ == "__main__":
                     # wandb.log({"train/gr_loss": loss_gr.item()}, step=global_step)
                     # del loss_gr  # free memory
                 if args.add_similarity_loss:
-                    raise NotImplementedError("Similarity loss is not implemented yet.")
-                    # loss += loss_sim.to(loss.device)
-                    # wandb.log({"train/sim_loss": loss_sim.item()}, step=global_step)
-                    # del loss_sim
+                    loss += loss_sim.to(loss.device)
+                    wandb.log({"train/loss_sim": loss_sim.item()}, step=global_step)
+                    del loss_sim
                 loss /= total_output_len  # average over the total output length
                 # import pdb; pdb.set_trace()  # check device. loss: ; total_loss_pg: ; total_kl: ; total_loss_rg: ; all at tf wm model's gpu
                 wandb.log({"train/loss": loss.item()}, step=global_step)
