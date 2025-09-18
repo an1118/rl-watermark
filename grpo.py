@@ -1130,7 +1130,7 @@ if __name__ == "__main__":
                     wm_texts_flat = [t for mb in mb_watermarked_texts for g in mb for t in g] # len = mb_size*G*num_wm
                     ori_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text) # [mb_size, D] 
                     # Compute wm_splits in batches to avoid OOM
-                    mini_batch_size = 128
+                    mini_batch_size = 16
                     wm_splits_list = []
                     for start_idx in range(0, len(wm_texts_flat), mini_batch_size):
                         end_idx = start_idx + mini_batch_size
