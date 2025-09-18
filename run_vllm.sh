@@ -61,7 +61,7 @@ branch="actor_embed_new" # sanity-detect_attack-v2 embed_vocab_size actor_embed_
 watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
 is_sanity_check=false 
 seed=666
-log_grad_norm=true
+log_grad_norm=false
 
 max_step=1000
 batch_size=16
@@ -84,7 +84,7 @@ use_soft_split=false
 use_median_split=false
 add_reward_gradient=true
 add_gr_loss=false
-add_similarity_loss=false
+add_similarity_loss=true
 curriculum="none"
 detect_steps=6
 spoof_steps=6
@@ -106,6 +106,7 @@ ppl_coef=0
 detect_gr_split_way="sampled"  # [sampled, pseudo]
 temp=1.0
 
+gradient_checkpointing=true
 do_eval=true
 eval_steps=20  # 20
 eval_batch_size=100  # 100
@@ -228,6 +229,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   $( [ "$add_reward_gradient" = true ] && echo "--add_reward_gradient" ) \
   $( [ "$add_gr_loss" = true ] && echo "--add_gr_loss" ) \
   $( [ "$add_similarity_loss" = true ] && echo "--add_similarity_loss" ) \
-  $( [ "$log_grad_norm" = true ] && echo "--log_grad_norm" )
+  $( [ "$log_grad_norm" = true ] && echo "--log_grad_norm" ) \
+  $( [ "$gradient_checkpointing" = true ] && echo "--gradient_checkpointing" )
 
 # CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py
