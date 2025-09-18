@@ -393,6 +393,7 @@ class Actor(nn.Module):
                 green_red_probs = self._get_green_red_split(embed_map_model, texts)
         else:
             green_red_probs = self._get_green_red_split(embed_map_model, texts)
+        original_green_red_probs = green_red_probs.clone()
         # if has_gradient: import pdb; pdb.set_trace()  # check gradient
         if self.config.detect_gr_split_way == 'pseudo':
             assert not has_gradient, "pseudo g/r split detection cannot have gradient"
@@ -482,7 +483,7 @@ class Actor(nn.Module):
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
         # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
-        return scores
+        return scores, original_green_red_probs
 
     def compute_ppl(self, texts):
         ppl_results = []
@@ -557,29 +558,31 @@ class Actor(nn.Module):
         start_time = time.time()
         ori_has_gradient = has_gradient and (self.config.binary or bool(detect_score_coefs['ori']))
         seeds = [seed * 10 + 0] * B
-        detect_ori = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+        detect_ori, ori_green_red_probs = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+        batch['ori_green_red_probs'] = ori_green_red_probs
         if self.config.strengthen:
-            detect_ori_para = self.detect(attack_ori_para_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
-            detect_ori_senti = self.detect(attack_ori_senti_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
-            detect_ori_hate = self.detect(attack_ori_hate_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_para, _ = self.detect(attack_ori_para_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_senti, _ = self.detect(attack_ori_senti_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_hate, _ = self.detect(attack_ori_hate_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
 
         seeds = [seed * 10 + i for i in range(G)] * B
         seeds = [s for s in seeds for _ in range(num_wm)]
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient, rng=rng, seeds=seeds)
+        detect_wm, wm_green_red_probs = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient, rng=rng, seeds=seeds)
         detect_wm = regroup_list(detect_wm, B, G, num_wm)
+        batch['wm_green_red_probs'] = wm_green_red_probs
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
-        detect_para = self.detect(attack_para_texts, has_gradient=para_has_gradient, rng=rng, seeds=seeds)
+        detect_para, _ = self.detect(attack_para_texts, has_gradient=para_has_gradient, rng=rng, seeds=seeds)
         detect_para = regroup_list(detect_para, B, G, num_wm)
 
         senti_has_gradient=has_gradient and bool(detect_score_coefs['senti'])
-        detect_senti = self.detect(attack_senti_texts, has_gradient=senti_has_gradient, rng=rng, seeds=seeds)
+        detect_senti, _ = self.detect(attack_senti_texts, has_gradient=senti_has_gradient, rng=rng, seeds=seeds)
         detect_senti = regroup_list(detect_senti, B, G, num_wm)
 
         hate_has_gradient=has_gradient and bool(detect_score_coefs['hate'])
-        detect_hate = self.detect(attack_hate_texts, has_gradient=hate_has_gradient, rng=rng, seeds=seeds)
+        detect_hate, _ = self.detect(attack_hate_texts, has_gradient=hate_has_gradient, rng=rng, seeds=seeds)
         detect_hate = regroup_list(detect_hate, B, G, num_wm)
         detect_time = time.time() - start_time
         print(f"Detection time: {detect_time:.4f} seconds")
@@ -1104,6 +1107,9 @@ if __name__ == "__main__":
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
+                    if args.add_similarity_loss:
+                        mb_ori_green_red_probs = result_dict['batch']['ori_green_red_probs']  # [mb_size, 384]
+                        mb_wm_green_red_probs = result_dict['batch']['wm_green_red_probs']  # [mb_size, G, num_wm, 384]
                     del result_dict, mb_attack_texts, mb_attack_ori_texts  # free memory
 
                 if args.add_gr_loss:
@@ -1137,22 +1143,10 @@ if __name__ == "__main__":
                     # Compute similarity loss between original and watermarked texts
                     G = args.G
                     num_wm = args.num_wm
-                    mb_size = len(mb_original_text)
-                    wm_texts_flat = [t for mb in mb_watermarked_texts for g in mb for t in g] # len = mb_size*G*num_wm
-                    ori_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text) # [mb_size, D] 
-                    # Compute wm_splits in batches to avoid OOM
-                    mini_batch_size = 16
-                    wm_splits_list = []
-                    for start_idx in range(0, len(wm_texts_flat), mini_batch_size):
-                        end_idx = start_idx + mini_batch_size
-                        batch_texts = wm_texts_flat[start_idx:end_idx]
-                        batch_splits = actor._get_green_red_split(actor.embed_map_model, batch_texts)
-                        wm_splits_list.append(batch_splits)
-                    wm_splits = torch.cat(wm_splits_list, dim=0)  # [mb_size*G*num_wm, D]
-                    ori_rep = torch.repeat_interleave(ori_splits, repeats=G*num_wm, dim=0) # [mb_size*G*num_wm, D]
-                    cos = F.cosine_similarity(ori_rep, wm_splits, dim=-1) # [mb_size*G*num_wm] 
+                    mb_ori_green_red_probs = torch.repeat_interleave(mb_ori_green_red_probs, repeats=G*num_wm, dim=0) # [mb_size*G*num_wm, D]
+                    cos = F.cosine_similarity(mb_ori_green_red_probs, mb_wm_green_red_probs, dim=-1) # [mb_size*G*num_wm] 
                     loss_sim = 1.0 - cos.mean()
-                    del ori_splits, wm_splits_list, wm_splits, ori_rep, cos, mb_original_text, mb_watermarked_texts
+                    del mb_ori_green_red_probs, mb_wm_green_red_probs, cos, mb_original_text, mb_watermarked_texts
 
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
