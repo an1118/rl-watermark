@@ -1077,6 +1077,7 @@ if __name__ == "__main__":
                             del ref_logprobs  # free memory
                 on_policy_logprob_time = time.time() - start_time
                 print(f"On policy logprob calculation time: {on_policy_logprob_time:.4f} seconds")
+                del mb_green_red_maps
                 
                 ### get on policy rewards
                 if args.add_reward_gradient:
@@ -1092,7 +1093,7 @@ if __name__ == "__main__":
                     )
                     # import pdb; pdb.set_trace()  # check that result_dict has gradient
                     new_mb_rewards = result_dict['batch']['rewards']  # [mb_size, G]
-                    del result_dict  # free memory
+                    del result_dict, mb_attack_texts, mb_attack_ori_texts  # free memory
 
                 if args.add_gr_loss:
                     raise NotImplementedError("GR loss is not implemented yet.")
@@ -1128,11 +1129,19 @@ if __name__ == "__main__":
                     mb_size = len(mb_original_text)
                     wm_texts_flat = [t for mb in mb_watermarked_texts for g in mb for t in g] # len = mb_size*G*num_wm
                     ori_splits = actor._get_green_red_split(actor.embed_map_model, mb_original_text) # [mb_size, D] 
-                    wm_splits = actor._get_green_red_split(actor.embed_map_model, wm_texts_flat) # [mb_size*G*num_wm, D]
+                    # Compute wm_splits in batches to avoid OOM
+                    mini_batch_size = 128
+                    wm_splits_list = []
+                    for start_idx in range(0, len(wm_texts_flat), mini_batch_size):
+                        end_idx = start_idx + mini_batch_size
+                        batch_texts = wm_texts_flat[start_idx:end_idx]
+                        batch_splits = actor._get_green_red_split(actor.embed_map_model, batch_texts)
+                        wm_splits_list.append(batch_splits)
+                    wm_splits = torch.cat(wm_splits_list, dim=0)  # [mb_size*G*num_wm, D]
                     ori_rep = torch.repeat_interleave(ori_splits, repeats=G*num_wm, dim=0) # [mb_size*G*num_wm, D]
                     cos = F.cosine_similarity(ori_rep, wm_splits, dim=-1) # [mb_size*G*num_wm] 
                     loss_sim = 1.0 - cos.mean()
-                    del ori_splits, wm_splits, ori_rep, cos
+                    del ori_splits, wm_splits_list, wm_splits, ori_rep, cos, mb_original_text, mb_watermarked_texts
 
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
@@ -1220,7 +1229,7 @@ if __name__ == "__main__":
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 ### free memory
-                del mb_original_text, mb_green_red_maps, mb_green_red_maps_logps, mb_watermarked_texts, mb_attack_texts, mb_attack_ori_texts, mb_advantages, new_mb_logprobs  # TOOD
+                del mb_green_red_maps_logps, mb_advantages, new_mb_logprobs
 
                 optimizer.zero_grad()
                 loss.backward()
