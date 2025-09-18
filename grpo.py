@@ -281,6 +281,7 @@ class Actor(nn.Module):
             mappings * torch.log(green_red_prob + 1e-8) +
             (1 - mappings) * torch.log(1 - green_red_prob + 1e-8)
         )
+        log_prob = torch.sum(log_prob, dim=-1)  # [G]
         mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
         return mappings_logps
 
@@ -1047,7 +1048,7 @@ if __name__ == "__main__":
 
                 mb_original_text = [batch['original_text'][idx] for idx in mb_inds]  # [mb_size]
                 mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
-                mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
+                mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G]
                 mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G, num_wm]
                 mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G, num_wm]}
                 if args.strengthen:
@@ -1061,8 +1062,8 @@ if __name__ == "__main__":
 
                 ### get on policy log probabilities and rewards
                 start_time = time.time()
-                new_mb_logprobs = []  # [mb_size, G, 384]
-                all_per_token_kl = []  # [mb_size, G, 384]
+                new_mb_logprobs = []  # [mb_size, G]
+                all_per_token_kl = []  # [mb_size, G]
                 for original_text, green_red_maps in zip(mb_original_text, mb_green_red_maps):
                     green_red_prob = actor._get_green_red_split(actor.embed_map_model, original_text)
                     new_logprobs = actor.get_logps(green_red_maps, green_red_prob)
@@ -1072,7 +1073,7 @@ if __name__ == "__main__":
                             green_red_prob = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
                             ref_logprobs = actor.get_logps(green_red_maps, green_red_prob)
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
-                            # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G, seq_len_i]
+                            # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G]
                             all_per_token_kl.append(per_token_kl)
                             del ref_logprobs  # free memory
                 on_policy_logprob_time = time.time() - start_time
@@ -1147,7 +1148,7 @@ if __name__ == "__main__":
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
-                        new_logprobs = new_mb_logprobs[j][i]  # [seq_len_i]
+                        new_logprobs = new_mb_logprobs[j][i]  # scalar tensor
                         old_logprobs = mb_green_red_maps_logps[j][i]
                         old_logprobs = old_logprobs.to(new_logprobs.device)
                         # import pdb; pdb.set_trace()  # new: has gradient, old: no gradient
@@ -1166,10 +1167,10 @@ if __name__ == "__main__":
                             pg_loss_clipped = -mb_advantages[j][i] * ratio_clipped
                             pg_loss = torch.max(pg_loss, pg_loss_clipped)
                         # import pdb; pdb.set_trace()  # check if pg_loss is calculated correctly
-                        total_loss_pg += pg_loss.sum()
+                        total_loss_pg += pg_loss
                         del pg_loss  # free memory
                         if args.beta != 0.0:
-                            kl = args.beta * all_per_token_kl[j][i].sum()
+                            kl = args.beta * all_per_token_kl[j][i]
                             total_kl += kl
                         if args.add_reward_gradient:
                             ratio_nogradient = ratio.detach()
@@ -1182,7 +1183,7 @@ if __name__ == "__main__":
                             # import pdb; pdb.set_trace()  # check if rg_loss is calculated correctly
                             total_loss_rg += rg_loss.sum()
                             del rg_loss  # free memory
-                        total_output_len += len(new_logprobs)
+                        total_output_len += 1
                 
                 ### log gradient norm
                 if args.log_grad_norm:
