@@ -155,6 +155,8 @@ class Args:
     # General training arguments
     checkpoint_dir: str = None
     """where to save best embed_map_model checkpoints"""
+    gradient_checkpointing: bool = False
+    """if True, enable torch gradient checkpointing on the embed_map_model"""
     run_name: str = None
     """the name of the run logged to wandb"""
     do_eval: bool = True
@@ -223,7 +225,13 @@ class Actor(nn.Module):
         )
 
         self.embed_map_tokenizer = AutoTokenizer.from_pretrained(embed_map_model_name)
-        self.embed_map_model = RobertaForCL.from_pretrained(embed_map_model_name, torch_dtype=torch_dtype).to(self.gpu2)
+        self.embed_map_model = RobertaForCL.from_pretrained(
+            embed_map_model_name, torch_dtype=torch_dtype
+        )
+        if config.gradient_checkpointing:
+            self.embed_map_model.gradient_checkpointing_enable()
+            self.embed_map_model.enable_input_require_grads()
+        self.embed_map_model = self.embed_map_model.to(self.gpu2)
         self.reference_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
         if self.config.freeze_detector:
             self.freeze_embed_map_model = create_reference_model(self.embed_map_model).to(self.gpu2)
