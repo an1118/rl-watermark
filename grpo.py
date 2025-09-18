@@ -380,9 +380,11 @@ class Actor(nn.Module):
             embed_map_model = self.freeze_embed_map_model
         else:
             embed_map_model = self.embed_map_model
-        green_red_probs = self._get_green_red_split(embed_map_model, texts)
         if not has_gradient:
-            green_red_probs = [g.detach() for g in green_red_probs]
+            with torch.no_grad():
+                green_red_probs = self._get_green_red_split(embed_map_model, texts)
+        else:
+            green_red_probs = self._get_green_red_split(embed_map_model, texts)
         # if has_gradient: import pdb; pdb.set_trace()  # check gradient
         if self.config.detect_gr_split_way == 'pseudo':
             assert not has_gradient, "pseudo g/r split detection cannot have gradient"
