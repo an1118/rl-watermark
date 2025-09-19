@@ -70,6 +70,7 @@ G=8  # 8
 num_wm=4
 clip_coef=0.2
 beta=0.04
+one_step_action=false
 
 learning_rate=5e-5
 lr_scheduler_type=constant
@@ -84,7 +85,7 @@ use_soft_split=false
 use_median_split=false
 add_reward_gradient=true
 add_gr_loss=false
-add_similarity_loss=true
+add_similarity_loss=false
 curriculum="none"
 detect_steps=6
 spoof_steps=6
@@ -106,7 +107,7 @@ ppl_coef=0
 detect_gr_split_way="sampled"  # [sampled, pseudo]
 temp=1.0
 
-gradient_checkpointing=true
+gradient_checkpointing=false
 do_eval=true
 eval_steps=20  # 20
 eval_batch_size=100  # 100
@@ -119,6 +120,9 @@ if [ -z "$model_name" ]; then
   exit 1
 fi
 run_id="${model_name}-${run_id}"
+if [ "$one_step_action" = true ]; then
+    run_id="${run_id}-one_step_action"
+fi
 if [ "$freeze_detector" = true ]; then
     run_id="${run_id}-freeze_detector"
     if [ "$detector_update_freq" -gt 0 ]; then
@@ -230,6 +234,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   $( [ "$add_gr_loss" = true ] && echo "--add_gr_loss" ) \
   $( [ "$add_similarity_loss" = true ] && echo "--add_similarity_loss" ) \
   $( [ "$log_grad_norm" = true ] && echo "--log_grad_norm" ) \
-  $( [ "$gradient_checkpointing" = true ] && echo "--gradient_checkpointing" )
+  $( [ "$gradient_checkpointing" = true ] && echo "--gradient_checkpointing" ) \
+  $( [ "$one_step_action" = true ] && echo "--one_step_action" )
 
 # CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py
