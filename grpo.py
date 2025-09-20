@@ -102,7 +102,7 @@ class Args:
     """the number of steps for the spoofing phase in curriculum learning"""
     detect_score_coefs_ori: float = 1.0
     """the coefficient of the original text's detection score in the reward calculation"""
-    ori_score_strategy: str = "smooth_gap"
+    ori_score_strategy: str = "abs"
     """the strategy to compute the original text's score, can be one of [raw, abs, dynamic, gap, smooth_gap]"""
     target_ori_score: float = 0.5
     """the target detection score of the original text, used to calculate the reward"""
@@ -130,10 +130,17 @@ class Args:
     """the coefficient of the hate attacked text's detection score in the reward calculation"""
     ppl_coef: float = 0.0
     """the coefficient of the perplexity in the reward calculation, if > 0, will compute perplexity"""
-    detect_gr_split_way: str = "sampled"
-    """the green-red token split way for detection, can be one of [sampled, pseudo]"""
+    detect_gr_split_way: str = "top-k"
+    """the green-red token split way for detection, can be one of [sampled, pseudo, top-k]"""
+    """the green-red token split way for detection, can be one of [sampled, pseudo, top-k]"""
     temp: float = 1.0
-    """the temperature for embedding before sigmoid, only used when `detect_gr_split_way` is 'pseudo'"""
+    """the temperature applied to the detector logits before sigmoid when sampling green tokens"""
+    topk_ratio: float = 0.5
+    """fraction of detector dimensions kept as green when `detect_gr_split_way` is 'top-k'"""
+    topk_tau: float = 1.0
+    """temperature of the Gumbel top-k relaxation when `detect_gr_split_way` is 'top-k'"""
+    eps: float = 1e-8
+    """a small value to avoid division by zero"""
 
     # Watermark specific arguments
     embed_map_model_name: str = "Shiyu-Lab/roberta-base-watermark-embed"
@@ -188,7 +195,9 @@ class Args:
                 raise ValueError("detect_steps and spoof_steps must be a multiple of num_minibatches.")
         if self.freeze_detector and self.add_reward_gradient:
             raise ValueError("freeze_detector and add_reward_gradient cannot both be True.")
-
+        if self.detect_gr_split_way == 'top-k' and not self.one_step_action:
+            raise ValueError("When using 'top-k' green-red split, 'one_step_action' must be True.")
+        
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
 1. **Preserves Meaning** – The paraphrase should convey the same core idea without omitting or distorting information.
@@ -260,39 +269,74 @@ class Actor(nn.Module):
 
 
     def rollout(self, text, G, rng=None, seed=None):
-        # get G/R probability
+        # get G/R map, embedding logits if 'top-k', else probability
         with torch.no_grad():
-            green_red_prob = self._get_green_red_split(self.embed_map_model, text)
+            green_red_prob_logit = self._get_green_red_split(self.embed_map_model, text)
         
-        if self.config.detect_gr_split_way == 'pseudo':
+        if self.config.detect_gr_split_way in ['pseudo', 'top-k']:
             seeds = [seed * 10 + i for i in range(G)]
+        else:
+            seeds = None
 
-        # Sample G binary mappings from green_red_prob
-        green_red_maps = []
+        # Sample G binary mappings from green_red_prob_logit
+        green_red_map_lst = []
         for i in range(G):
-            if self.config.detect_gr_split_way == 'pseudo':
+            if self.config.detect_gr_split_way in ['pseudo', 'top-k']:
                 rng.manual_seed(seeds[i])
-            mapping = torch.bernoulli(green_red_prob, generator=rng)
-            green_red_maps.append(mapping)
+            if self.config.detect_gr_split_way == 'top-k':
+                target_k = max(1, min(green_red_prob_logit.size(-1), int(round(green_red_prob_logit.size(-1) * self.config.topk_ratio))))
+                mapping = self._sample_gumbel_topk(green_red_prob_logit, target_k, self.config.topk_tau, generator=rng)
+            else:
+                mapping = torch.bernoulli(green_red_prob_logit, generator=rng)
+            green_red_map_lst.append(mapping)
         # import pdb; pdb.set_trace()  # check G mappings are different, device: gpu2(embed's device)
-        green_red_maps = torch.cat(green_red_maps, dim=0)  # [G, 384]
+        green_red_map_lst = torch.cat(green_red_map_lst, dim=0)  # [G, 384]
 
-        # For each mapping, compute the log probability of getting that mapping given green_red_prob
-        green_red_maps_logps = self.get_logps(green_red_maps, green_red_prob)
+        # For each mapping, compute the log probability of getting that mapping given green_red_prob_logit
+        green_red_map_logps = self.get_logps(green_red_map_lst, green_red_prob_logit, seeds=seeds, rng=rng)
 
         # Generate watermarked texts
-        green_red_splits = [m[self.mapping_list] for m in green_red_maps]
+        green_red_splits = [m[self.mapping_list] for m in green_red_map_lst]
         watermarked_texts = [self.generate_watermarked_text(text, split, n=self.config.num_wm) for split in green_red_splits] # list of list of strings, len: (G, num_wm)
-        return green_red_maps, green_red_maps_logps, watermarked_texts
-    
-    def get_logps(self, mappings, green_red_prob):
-        # Compute log-probabilities for all mappings at once
-        log_prob = (
-            mappings * torch.log(green_red_prob + 1e-8) +
-            (1 - mappings) * torch.log(1 - green_red_prob + 1e-8)
-        )
-        if self.config.one_step_action:
-            log_prob = torch.sum(log_prob, dim=-1)  # [G]
+        return green_red_map_lst, green_red_map_logps, watermarked_texts
+
+    def get_logps(self, mappings, green_red_prob_logit, seeds=None, rng=None):
+        eps = self.config.eps
+        if mappings.dim() == 1:
+            mappings = mappings.unsqueeze(0)
+        if green_red_prob_logit.dim() == 1:
+            green_red_prob_logit = green_red_prob_logit.unsqueeze(0)
+
+        if self.config.detect_gr_split_way == 'top-k':
+            tau = max(self.config.topk_tau, eps)
+            # reconstruct gumbel perturbed logits
+            gumbels_lst = []
+            for i in range(len(mappings)):
+                rng.manual_seed(seeds[i])
+                gumbels = -torch.log(
+                    -torch.log(torch.rand(mappings[i].shape, device=mappings.device, generator=rng) + eps) + eps
+                )
+                gumbels_lst.append(gumbels)
+            gumbels = torch.stack(gumbels_lst)
+            scores = (green_red_prob_logit + gumbels) / tau
+            # log-softmax per row
+            logp = torch.log_softmax(scores, dim=-1)
+            # Use the *hard* part of the ST mask for which positions were selected
+            hard_sel = (mappings.detach() >= 1.0).float()  # [G, D]
+            # Check that each row in hard_sel has approximately half True values
+            num_selected = hard_sel.sum(dim=-1)
+            expected_selected = hard_sel.size(-1) // 2
+            assert torch.all((num_selected == expected_selected)), \
+                f"Each row in hard_sel should have half True. Got: {num_selected.tolist()}, expected: {expected_selected}"
+            # Sum log-probs over selected indices; (with-replacement surrogate)
+            log_prob = torch.sum(logp * hard_sel, dim=-1)  # [G]
+        else:
+            log_prob = (
+                mappings * torch.log(green_red_prob_logit.clamp_min(eps)) +
+                (1 - mappings) * torch.log((1 - green_red_prob_logit).clamp_min(eps))
+            )
+            if self.config.one_step_action:
+                log_prob = torch.sum(log_prob, dim=-1)  # [G]
         mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
         return mappings_logps
 
@@ -322,6 +366,19 @@ class Actor(nn.Module):
         watermarked_texts = [o.text.strip() for o in outputs[0].outputs]
         return watermarked_texts
 
+    def _sample_gumbel_topk(self, logits, k, tau, generator=None):
+        eps = self.config.eps
+        k = max(1, min(logits.size(-1), k))
+        gumbels = -torch.log(
+            -torch.log(torch.rand(logits.shape, device=logits.device, generator=generator) + eps) + eps
+        )
+        scaled = (logits + gumbels) / max(tau, eps)
+        topk = torch.topk(scaled, k=k, dim=-1)
+        hard_mask = torch.zeros_like(logits)
+        hard_mask.scatter_(dim=-1, index=topk.indices, value=1.0)
+        soft_mask = torch.softmax(scaled, dim=-1)
+        return hard_mask - soft_mask.detach() + soft_mask
+
     def _get_green_red_split(self, model, texts):
         input_ids = self.embed_map_tokenizer(
             texts,
@@ -332,8 +389,12 @@ class Actor(nn.Module):
         ).to(model.device)
         outputs = model(**input_ids, return_dict=True, sent_emb=True)
         mappings = outputs.pooler_output
-        temp = self.config.temp
-        mappings = torch.sigmoid(mappings * temp)
+        if self.config.detect_gr_split_way == 'top-k':
+            # return logits directly for gumbel top-k sampling
+            pass
+        else:
+            temp = self.config.temp
+            mappings = torch.sigmoid(mappings * temp)
         mappings = mappings.to(self.watermark_model.device)
         # import pdb; pdb.set_trace()  # check mapping shape: [B, 384], should have gradient
         return mappings
@@ -370,6 +431,8 @@ class Actor(nn.Module):
             for s, prob in zip(seeds, green_red_probs):
                 rng.manual_seed(s)
                 green_red_maps.append(torch.bernoulli(prob, generator=rng))
+        elif self.config.detect_gr_split_way == 'top-k':
+            return [0.5] * len(texts)  
         else:
             green_red_maps = torch.bernoulli(green_red_probs)
         green_red_splits = [m[self.mapping_list] for m in green_red_maps]
@@ -393,17 +456,33 @@ class Actor(nn.Module):
             embed_map_model = self.embed_map_model
         if not has_gradient:
             with torch.no_grad():
-                green_red_probs = self._get_green_red_split(embed_map_model, texts)
+                green_red_prob_logits = self._get_green_red_split(embed_map_model, texts)
         else:
-            green_red_probs = self._get_green_red_split(embed_map_model, texts)
-        original_green_red_probs = green_red_probs.clone()
+            green_red_prob_logits = self._get_green_red_split(embed_map_model, texts)
         # if has_gradient: import pdb; pdb.set_trace()  # check gradient
         if self.config.detect_gr_split_way == 'pseudo':
             assert not has_gradient, "pseudo g/r split detection cannot have gradient"
             assert len(seeds) == len(texts), f"If seeds is a list, its length must match the number of texts. Got len(seeds)={len(seeds)}, len(texts)={len(texts)}"
-            for i, (s, prob) in enumerate(zip(seeds, green_red_probs)):
+            green_red_maps = [None] * len(texts)
+            for i, (s, prob) in enumerate(zip(seeds, green_red_prob_logits)):
                 rng.manual_seed(s)
-                green_red_probs[i] = torch.bernoulli(prob, generator=rng)
+                green_red_maps[i] = torch.bernoulli(prob, generator=rng)
+        elif self.config.detect_gr_split_way == 'top-k':
+            target_k = max(1, min(green_red_prob_logits.size(-1), int(round(green_red_prob_logits.size(-1) * self.config.topk_ratio))))
+            if seeds is not None:
+                # construct gumbel noise
+                assert len(seeds) == len(texts), f"If seeds is a list, its length must match the number of texts. Got len(seeds)={len(seeds)}, len(texts)={len(texts)}"
+                green_red_maps = []
+                for i, (s, logit) in enumerate(zip(seeds, green_red_prob_logits)):
+                    rng.manual_seed(s)
+                    map_ = self._sample_gumbel_topk(logit, target_k, self.config.topk_tau, generator=rng)
+                    green_red_maps.append(map_)
+            else:
+                topk = torch.topk(green_red_prob_logits, k=target_k, dim=-1)
+                green_red_maps = torch.zeros_like(green_red_prob_logits)
+                green_red_maps.scatter_(dim=-1, index=topk.indices, value=1.0)
+        else:
+            green_red_maps = green_red_prob_logits
 
         # start_time = time.time()
         # Tokenize the batch
@@ -449,7 +528,7 @@ class Actor(nn.Module):
         for start in range(0, len(texts), mini_batch_size):
             end = min(start + mini_batch_size, len(texts))
             batch_inputs = {k: v[start:end].to(self.watermark_model.device) for k, v in inputs.items()}
-            batch_green_red_probs = green_red_probs[start:end]
+            batch_green_red_probs = green_red_maps[start:end]
             batch_green_red_probs = [m[self.mapping_list] for m in batch_green_red_probs]
             batch_entropy = all_entropy[start:start + mini_batch_size]  # [miniB, L-1]
 
@@ -482,11 +561,11 @@ class Actor(nn.Module):
             del batch_inputs, batch_green_red_probs, batch_entropy  # free memory
 
         # print(f"===========", flush=True)
-        del all_entropy, inputs, green_red_probs  # free memory
+        del all_entropy, inputs, green_red_maps  # free memory
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
         # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
-        return scores, original_green_red_probs
+        return scores, green_red_prob_logits
 
     def compute_ppl(self, texts):
         ppl_results = []
@@ -548,6 +627,7 @@ class Actor(nn.Module):
             batch['attack_texts'] = run_attacks(batch['watermarked_texts'], detect_score_coefs, self.attack_client, self.attack_tokenizer)
             attack_para_texts, attack_senti_texts, attack_hate_texts = batch['attack_texts']['para'], batch['attack_texts']['senti'], batch['attack_texts']['hate']
             if self.config.strengthen:
+                print("\nRunning attacks on original texts...", flush=True)
                 ori_nested_lst = [[[t]] for t in batch['original_text']]  # B x 1 x 1
                 batch['attack_ori_texts'] = run_attacks(ori_nested_lst, detect_score_coefs, self.attack_client, self.attack_tokenizer)
                 attack_ori_para_texts, attack_ori_senti_texts, attack_ori_hate_texts = batch['attack_ori_texts']['para'], batch['attack_ori_texts']['senti'], batch['attack_ori_texts']['hate']
@@ -745,18 +825,49 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
         valid_original_data = valid_set[data_idx]
         with torch.no_grad():
-            green_red_prob = actor._get_green_red_split(actor.embed_map_model, valid_original_data).squeeze(0)
+            green_red_prob_logit = actor._get_green_red_split(actor.embed_map_model, valid_original_data).squeeze(0)
         if config.detect_gr_split_way == 'pseudo':
             rng.manual_seed(seed * 10 + 0)
-        mapping = torch.bernoulli(green_red_prob, generator=rng)
+            mapping = torch.bernoulli(green_red_prob_logit, generator=rng)
+        elif config.detect_gr_split_way == 'top-k':
+            target_k = max(1, min(green_red_prob_logit.size(-1), int(round(green_red_prob_logit.size(-1) * config.topk_ratio))))
+            topk = torch.topk(green_red_prob_logit, k=target_k, dim=-1)
+            mapping = torch.zeros_like(green_red_prob_logit)
+            mapping.scatter_(dim=-1, index=topk.indices, value=1.0)
+        else:
+            mapping = torch.bernoulli(green_red_prob_logit)
         green_red_split = mapping[actor.mapping_list]
         # generate watermarked text with G=1
         valid_watermarked_text = actor.generate_watermarked_text(valid_original_data, green_red_split)
         valid_batch['watermarked_texts'].append([valid_watermarked_text]) # add an extra list dimension for G=1
     # attack
-    result_dict = actor.compute_rewards(valid_batch, rng=rng, seed=seed)
-    valid_batch = result_dict['batch']
-    # import pdb; pdb.set_trace()  # check if valid_batch['rewards'] has gradient, check detection shape
+    fake_coefs = {'para': True, 'senti': True, 'hate': True}
+    valid_batch['attack_texts'] = run_attacks(valid_batch['watermarked_texts'], fake_coefs, actor.attack_client, actor.attack_tokenizer)
+    attack_para_texts, attack_senti_texts, attack_hate_texts = valid_batch['attack_texts']['para'], valid_batch['attack_texts']['senti'], valid_batch['attack_texts']['hate']
+    if args.strengthen:
+        print("\nRunning attacks on original texts...", flush=True)
+        ori_nested_lst = [[[t]] for t in valid_batch['original_text']]  # B x 1 x 1
+        valid_batch['attack_ori_texts'] = run_attacks(ori_nested_lst, fake_coefs, actor.attack_client, actor.attack_tokenizer)
+        attack_ori_para_texts, attack_ori_senti_texts, attack_ori_hate_texts = valid_batch['attack_ori_texts']['para'], valid_batch['attack_ori_texts']['senti'], valid_batch['attack_ori_texts']['hate']
+    # detect
+    if args.detect_gr_split_way == 'pseudo':
+        seeds=[seed * 10 + 0] * len(valid_batch['original_text'])
+    else:
+        seeds=None
+    detect_ori, _ = actor.detect(valid_batch['original_text'], has_gradient=False, rng=rng, seeds=seeds)
+    if config.strengthen:
+        detect_ori_para, _ = actor.detect(attack_ori_para_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_senti, _ = actor.detect(attack_ori_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_hate, _ = actor.detect(attack_ori_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_para = [d for d in detect_ori_para if d is not None]
+        detect_ori_senti = [d for d in detect_ori_senti if d is not None]
+    detect_wm, _ = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
+    detect_para, _ = actor.detect(attack_para_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_senti, _ = actor.detect(attack_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_hate, _ = actor.detect(attack_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_para = [d for d in detect_para if d is not None]
+    detect_senti = [d for d in detect_senti if d is not None]
+    
     # Log the median of each score to wandb
     def safe_median(x):
         x = [v for v in x if v is not None]
@@ -764,27 +875,23 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
             x = [v.item() for v in x]
         return float(np.median(x))
     wandb.log({
-        "eval/median_ori_score": safe_median(result_dict['detect_ori']),
-        "eval/median_wm_score": safe_median(result_dict['detect_wm']),
-        "eval/median_para_score": safe_median(result_dict['detect_para']),
-        "eval/median_senti_score": safe_median(result_dict['detect_senti']),
-        "eval/median_hate_score": safe_median(result_dict['detect_hate']),
+        "eval/median_ori_score": safe_median(detect_ori),
+        "eval/median_wm_score": safe_median(detect_wm),
+        "eval/median_para_score": safe_median(detect_para),
+        "eval/median_senti_score": safe_median(detect_senti),
+        "eval/median_hate_score": safe_median(detect_hate),
     }, step=actor.global_step)
-    if 'ppl' in result_dict:
+    # if 'ppl' in result_dict:
+    #     wandb.log({
+    #         "eval/median_ppl": safe_median(result_dict['ppl']),
+    #     }, step=actor.global_step)
+    if config.strengthen:
         wandb.log({
-            "eval/median_ppl": safe_median(result_dict['ppl']),
-        }, step=actor.global_step)
-    if 'detect_ori_para' in result_dict:
-        wandb.log({
-            "eval/median_ori_para_score": safe_median(result_dict['detect_ori_para']),
-            "eval/median_ori_senti_score": safe_median(result_dict['detect_ori_senti']),
-            "eval/median_ori_hate_score": safe_median(result_dict['detect_ori_hate']),
+            "eval/median_ori_para_score": safe_median(detect_ori_para),
+            "eval/median_ori_senti_score": safe_median(detect_ori_senti),
+            "eval/median_ori_hate_score": safe_median(detect_ori_hate),
         }, step=actor.global_step)
     # Compute and log green token ratios
-    if config.detect_gr_split_way == 'pseudo':
-        seeds=[seed * 10 + 0] * len(valid_batch['original_text'])
-    else:
-        seeds=None
     with torch.no_grad():
         green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'], rng=rng, seeds=seeds)
     wandb.log({
@@ -793,10 +900,10 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         "eval/green_ratio_min": np.min(green_token_ratios),
     }, step=actor.global_step)
     # Compute and log the auc for each dimension
-    auc_detect, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_wm'])
-    auc_para, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_para'])
-    auc_senti, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_senti'])
-    auc_hate, _, _ = calculate_roc_auc(result_dict['detect_ori'], result_dict['detect_hate'])
+    auc_detect, _, _ = calculate_roc_auc(detect_ori, detect_wm)
+    auc_para, _, _ = calculate_roc_auc(detect_ori, detect_para)
+    auc_senti, _, _ = calculate_roc_auc(detect_ori, detect_senti)
+    auc_hate, _, _ = calculate_roc_auc(detect_ori, detect_hate)
     wandb.log({
         "eval/auc_detect": auc_detect,
         "eval/auc_para": auc_para,
@@ -983,13 +1090,13 @@ if __name__ == "__main__":
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
-                green_red_maps, green_red_maps_logps, watermarked_texts = actor.rollout(original_data, args.G, rng, seed)  # device: cpu
-                assert len(green_red_maps) == len(green_red_maps_logps) == len(watermarked_texts) == args.G, \
-                    f"data_idx {data_idx}: rollout length not equal to G. {len(green_red_maps)}, {len(green_red_maps_logps)}, {len(watermarked_texts)} vs {args.G}"
+                green_red_maps, green_red_map_logps, watermarked_texts = actor.rollout(original_data, args.G, rng, seed)  # device: cpu
+                assert len(green_red_maps) == len(green_red_map_logps) == len(watermarked_texts) == args.G, \
+                    f"data_idx {data_idx}: rollout length not equal to G. {len(green_red_maps)}, {len(green_red_map_logps)}, {len(watermarked_texts)} vs {args.G}"
                 assert all([len(t) == args.num_wm for t in watermarked_texts]), \
                     f"data_idx {data_idx}: number of watermarked texts not equal to num_wm. {[len(t) for t in watermarked_texts]} vs {args.num_wm}"
                 batch['green_red_maps'].append(green_red_maps)
-                batch['green_red_maps_logps'].append(green_red_maps_logps)
+                batch['green_red_map_logps'].append(green_red_map_logps)
                 batch['watermarked_texts'].append(watermarked_texts)
             # import pdb; pdb.set_trace()  # check shape
             
@@ -1064,7 +1171,7 @@ if __name__ == "__main__":
 
                 mb_original_text = [batch['original_text'][idx] for idx in mb_inds]  # [mb_size]
                 mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
-                mb_green_red_maps_logps = [batch['green_red_maps_logps'][idx] for idx in mb_inds]  # [mb_size, G] if one_step_action is true, else [mb_size, G, 384]
+                mb_green_red_map_logps = [batch['green_red_map_logps'][idx] for idx in mb_inds]  # [mb_size, G] if one_step_action is true, else [mb_size, G, 384]
                 mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G, num_wm]
                 mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G, num_wm]}
                 if args.strengthen:
@@ -1080,14 +1187,18 @@ if __name__ == "__main__":
                 start_time = time.time()
                 new_mb_logprobs = []  # [mb_size, G] if one_step_action is true, else [mb_size, G, 384]
                 all_per_token_kl = []  # [mb_size, G] if one_step_action is true, else [mb_size, G, 384]
+                if args.detect_gr_split_way in ['pseudo', 'top-k']:
+                    seeds = [seed * 10 + i for i in range(args.G)]
+                else:
+                    seeds = None
                 for original_text, green_red_maps in zip(mb_original_text, mb_green_red_maps):
-                    green_red_prob = actor._get_green_red_split(actor.embed_map_model, original_text)
-                    new_logprobs = actor.get_logps(green_red_maps, green_red_prob)
+                    green_red_prob_logit = actor._get_green_red_split(actor.embed_map_model, original_text)
+                    new_logprobs = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng)
                     new_mb_logprobs.append(new_logprobs)
                     if args.beta != 0.0:
                         with torch.no_grad():
-                            green_red_prob = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
-                            ref_logprobs = actor.get_logps(green_red_maps, green_red_prob)
+                            green_red_prob_logit = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
+                            ref_logprobs = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng)
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G] if one_step_action is true, else [G, 384]
                             all_per_token_kl.append(per_token_kl)
@@ -1156,7 +1267,7 @@ if __name__ == "__main__":
                 for j in range(len(new_mb_logprobs)):  # iterate through minibatch
                     for i in range(args.G):  # iterate through group
                         new_logprobs = new_mb_logprobs[j][i]  # scalar tensor if one_step_action is true, else [384]
-                        old_logprobs = mb_green_red_maps_logps[j][i]
+                        old_logprobs = mb_green_red_map_logps[j][i]
                         old_logprobs = old_logprobs.to(new_logprobs.device)
                         # import pdb; pdb.set_trace()  # new: has gradient, old: no gradient
                         try:
@@ -1246,7 +1357,7 @@ if __name__ == "__main__":
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
                 ### free memory
-                del mb_green_red_maps_logps, mb_advantages, new_mb_logprobs
+                del mb_green_red_map_logps, mb_advantages, new_mb_logprobs
 
                 optimizer.zero_grad()
                 loss.backward()

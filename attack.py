@@ -517,7 +517,7 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
         attack_para_texts = vllm_generate_responses(watermarked_texts, paraphrase_prompt, client, tokenizer)  # [B*G]
         # attack_para_texts = regroup_list(attack_para_texts, B, G)  # regroup into [B, G]
         elapsed_time = time.time() - start_time
-        print(f"\nParaphrase attack took {elapsed_time:.2f} seconds.", flush=True)
+        print(f"Paraphrase attack took {elapsed_time:.2f} seconds.", flush=True)
         # import pdb; pdb.set_trace()  # check paraphrase attack results
     else:
         attack_para_texts = None
@@ -528,7 +528,7 @@ def run_attacks_vllm(watermarked_texts, attack_flags, client, tokenizer):
         attack_hate_texts = hate_attack(watermarked_texts, group_name_list, client, tokenizer)
         # attack_hate_texts = regroup_list(attack_hate_texts, B, G)
         elapsed_time = time.time() - start_time
-        print(f"\nHate attack took {elapsed_time:.2f} seconds.", flush=True)
+        print(f"Hate attack took {elapsed_time:.2f} seconds.", flush=True)
     else:
         attack_hate_texts = None
 
