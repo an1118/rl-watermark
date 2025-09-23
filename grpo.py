@@ -322,14 +322,18 @@ class Actor(nn.Module):
             # log-softmax per row
             logp = torch.log_softmax(scores, dim=-1)
             # Use the *hard* part of the ST mask for which positions were selected
-            hard_sel = (mappings.detach() >= 1.0).float()  # [G, D]
+            hard_sel = (mappings.detach() >= 0.5).float()  # [G, D]
             # Check that each row in hard_sel has approximately half True values
             num_selected = hard_sel.sum(dim=-1)
             expected_selected = hard_sel.size(-1) // 2
             assert torch.all((num_selected == expected_selected)), \
                 f"Each row in hard_sel should have half True. Got: {num_selected.tolist()}, expected: {expected_selected}"
-            # Sum log-probs over selected indices; (with-replacement surrogate)
-            log_prob = torch.sum(logp * hard_sel, dim=-1)  # [G]
+            if self.config.one_step_action:
+                # Sum log-probs over selected indices; (with-replacement surrogate)
+                log_prob = torch.sum(logp * hard_sel, dim=-1)  # [G]
+            else:
+                # For positions where mappings == 1, keep logp; otherwise, use a small value (e.g., -1e8)
+                log_prob = logp * hard_sel + (1 - hard_sel) * eps
         else:
             log_prob = (
                 mappings * torch.log(green_red_prob_logit.clamp_min(eps)) +
