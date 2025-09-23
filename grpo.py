@@ -195,8 +195,6 @@ class Args:
                 raise ValueError("detect_steps and spoof_steps must be a multiple of num_minibatches.")
         if self.freeze_detector and self.add_reward_gradient:
             raise ValueError("freeze_detector and add_reward_gradient cannot both be True.")
-        if self.detect_gr_split_way == 'top-k' and not self.one_step_action:
-            raise ValueError("When using 'top-k' green-red split, 'one_step_action' must be True.")
         
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
