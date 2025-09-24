@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=watermark
-#SBATCH --output=outputs/%j.out
-#SBATCH --error=outputs/%j.err
+#SBATCH --job-name=train
+#SBATCH --output=outputs/logs/%j.out
+#SBATCH --error=outputs/logs/%j.err
 #SBATCH --nodes=1
 #SBATCH --partition=hpg-b200
 ##SBATCH --reservation=buyuheng 
@@ -58,16 +58,16 @@ repo="/blue/buyuheng/li_an.ucsb/projects"
 github_repo="git@github.com:an1118/rl-watermark.git"
 branch="actor_embed_new" # sanity-detect_attack-v2 embed_vocab_size actor_embed_new
 
-watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct
+watermark_model_name="meta-llama/Llama-3.1-8B-Instruct"  # Qwen/Qwen3-8B meta-llama/Llama-3.1-8B-Instruct Qwen/Qwen2.5-7B-Instruct
 is_sanity_check=false 
 seed=666
-log_grad_norm=false
+log_grad_norm=true
 
 max_step=1000
 batch_size=16
 num_minibatches=2
 G=8  # 8
-num_wm=4
+num_wm=1
 clip_coef=0.2
 beta=0.04
 one_step_action=false
@@ -78,12 +78,16 @@ warmup_steps=0
 
 freeze_detector=false
 detector_update_freq=-1
+delta=0.13
+delta_scheduler="cosine"
+delta_initial=0.5
+delta_hold_steps=50
 
-strengthen=true
+strengthen=false
 binary=false  # if true, how to add second gradient
 use_soft_split=false
 use_median_split=false
-add_reward_gradient=true
+add_reward_gradient=false
 add_gr_loss=false
 add_similarity_loss=false
 curriculum="none"
@@ -104,7 +108,7 @@ detect_score_coefs_senti=1
 # detect_score_coefs_latter=1
 detect_score_coefs_hate=1
 ppl_coef=0
-detect_gr_split_way="sampled"  # [sampled, pseudo]
+detect_gr_split_way="sampled"  # [sampled, pseudo, top-k]
 temp=1.0
 
 gradient_checkpointing=false
@@ -113,7 +117,7 @@ eval_steps=20  # 20
 eval_batch_size=100  # 100
 
 
-run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-detect@${detect_gr_split_way}_temp@${temp}-strengthen@${strengthen}"
+run_id="n${num_wm}_lr_${learning_rate}_${lr_scheduler_type}_${warmup_steps}-delta@${delta}@${delta_scheduler}-detect@${detect_gr_split_way}_temp@${temp}-strengthen@${strengthen}"
 model_name=$(echo "$watermark_model_name" | awk -F'/' '{print $2}')
 if [ -z "$model_name" ]; then
   echo "Failed to extract model name from watermark_model_name: $watermark_model_name" >&2
@@ -198,6 +202,10 @@ CUDA_VISIBLE_DEVICES=1,2,3 python grpo.py \
   --lr_scheduler_type $lr_scheduler_type \
   --warmup_steps $warmup_steps \
   --checkpoint_dir $repo/rl-watermark/ckpts/$run_id \
+  --delta $delta \
+  --delta_initial $delta_initial \
+  --delta_hold_steps $delta_hold_steps \
+  --delta_scheduler $delta_scheduler \
   --run_name $run_id \
   --curriculum $curriculum \
   --detect_steps $detect_steps \

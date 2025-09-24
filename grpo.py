@@ -25,7 +25,7 @@ from util import (
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
     regroup_list, curriculum_learning_schedule, coef_strategy, 
-    str_to_torch_dtype
+    str_to_torch_dtype, DeltaCosineScheduler
 )
 from text_quality_score import _judge_text_quality
 
@@ -155,6 +155,14 @@ class Args:
     """if toggled, freeze the embed_map_model used for detection"""
     detector_update_freq: int = -1
     """the frequency (in steps) to update the detector when `freeze_detector` is True, if -1, never update"""
+    delta: float = 0.13
+    """value when constant; or the minimum watermark strength reached after decay"""
+    delta_scheduler: str = "cosine"
+    """the scheduler for delta, can be one of [constant, cosine]"""
+    delta_initial: float = 0.13
+    """the initial (maximum) watermark strength at the start of training"""
+    delta_hold_steps: int = 0
+    """number of steps to hold the initial delta before starting the decay"""
 
     # Dataset specific arguments
     dataset_name: str = "Shiyu-Lab/C4-contrastive-watermark"
@@ -195,6 +203,8 @@ class Args:
                 raise ValueError("detect_steps and spoof_steps must be a multiple of num_minibatches.")
         if self.freeze_detector and self.add_reward_gradient:
             raise ValueError("freeze_detector and add_reward_gradient cannot both be True.")
+        if self.delta_initial < self.delta:
+            raise ValueError("delta_initial must be greater than or equal to delta.")
         
 SYS_PROMPT = f'''Paraphrase the following text while preserving its original meaning. Ensure that the output meets the following criteria:
 
@@ -259,11 +269,27 @@ class Actor(nn.Module):
         self.attack_tokenizer = AutoTokenizer.from_pretrained(attack_model_name) if attack_model_name else None
         self.attack_client = OpenAI(api_key="EMPTY", base_url=attack_model_url) if attack_model_url else None
 
-        self.delta = 0.13  # watermark strength
+        scheduler_name = self.config.delta_scheduler.lower()
+        if scheduler_name == 'cosine':
+            self.delta_scheduler = DeltaCosineScheduler(
+                initial=config.delta_initial,
+                minimum=config.delta,
+                hold_steps=config.delta_hold_steps,
+                total_steps=config.max_step,
+            )
+        elif scheduler_name == 'constant':
+            self.delta_scheduler = lambda step: config.delta
+        else:
+            raise NotImplementedError(f"Unsupported delta scheduler: {self.config.delta_scheduler}")
+        self.delta = self.delta_scheduler(0)
         self.alpha = 1.0  # entropy threshold to add watermark
         self.measure_threshold = 20  # threshold to measure the entropy of the logits
 
         self.global_step = 0
+
+    def update_delta(self, step: int) -> None:
+        """Update delta using the configured scheduler at the given step."""
+        self.delta = self.delta_scheduler(step)
 
 
     def rollout(self, text, G, rng=None, seed=None):
@@ -822,6 +848,8 @@ def save_checkpoint(actor, checkpoint_dir, best_metric_name, best_metric_value=N
         print(f"[Checkpoint] saved to {ckpt_path}", flush=True)
 
 def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
+    original_delta = actor.delta
+    actor.delta = config.delta
     valid_batch = {'original_text': valid_set}
     valid_batch['watermarked_texts'] = []  # [B, G=1], each is [wm_text]
     for data_idx in tqdm(range(len(valid_set)), desc="Rolling out valid batch"):
@@ -920,6 +948,7 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
     if overall_auc > best_auc and actor.global_step > 0:
         best_auc = overall_auc
         save_checkpoint(actor, config.checkpoint_dir, "best-overall_auc", best_auc, actor.global_step)
+    actor.delta = original_delta
     return best_auc
 
 
@@ -1087,6 +1116,10 @@ if __name__ == "__main__":
             seed = args.seed + iteration
             batch = defaultdict(list)
             batch['original_text'] = train_set[iteration : iteration + args.batch_size]
+
+            actor.update_delta(global_step)
+            if args.track:
+                wandb.log({"train/delta": actor.delta}, step=global_step)
 
             ## rollout
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
@@ -1369,6 +1402,9 @@ if __name__ == "__main__":
 
                 global_step += 1
                 actor.global_step = global_step  # update global step in actor
+                actor.update_delta(global_step)
+                if args.track:
+                    wandb.log({"train/delta": actor.delta}, step=global_step)
                 print("Step", global_step, "loss:", loss.item())
                 current_lr = optimizer.param_groups[0]['lr']
                 wandb.log({"train/learning_rate": current_lr}, step=global_step)

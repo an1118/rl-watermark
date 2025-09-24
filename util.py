@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
-import math
+from math import exp, cos, pi
 import numpy as np
 import wandb
 from copy import deepcopy
@@ -287,7 +287,7 @@ def regroup_list(flat_list, batch, group, num_wm=1):
 
 def exponential_schedule(step, max_step, growth_rate, min_val=1, max_val=100):
     ratio = min(step / max_step, 1.0)
-    coeff = 1 - math.exp(-growth_rate * ratio)
+    coeff = 1 - exp(-growth_rate * ratio)
     return min_val + (max_val - min_val) * coeff
 
 
@@ -296,7 +296,7 @@ def gap(score, center=0.5, width=0.1, sharpness=10, min_coeff=0.0, max_coeff=100
         return 0.0
     # Push values toward 0 if near center, toward 1 if far from center
     dist_from_center = abs(score - center)
-    coeff = 1 / (1 + math.exp(-sharpness * (dist_from_center - width)))
+    coeff = 1 / (1 + exp(-sharpness * (dist_from_center - width)))
     return min_coeff + (max_coeff - min_coeff) * coeff
 
 def smooth_gap(score, center=0.5, width1=0.05, width2=0.15, growth_rate1=50, growth_rate2=250, max_value=70):
@@ -408,4 +408,22 @@ def coef_strategy(strategy, score, coef, target_score, step, max_step, growth_ra
     else:
         raise ValueError(f"Unknown score strategy: {strategy}")
     return score, coef
+
+
+class DeltaCosineScheduler:
+    """Cosine scheduler that decays delta after a hold period."""
+
+    def __init__(self, initial: float, minimum: float, hold_steps: int, total_steps: int):
+        self.initial = initial
+        self.minimum = minimum
+        self.hold_steps = max(0, hold_steps)
+        self.total_steps = max(1, total_steps)
+        self.decay_steps = max(1, self.total_steps - self.hold_steps)
+
+    def __call__(self, step: int) -> float:
+        if step < self.hold_steps:
+            return self.initial
+        progress = min(1.0, max(0.0, (step - self.hold_steps) / self.decay_steps))
+        cosine_term = 0.5 * (1 + cos(pi * progress))
+        return self.minimum + (self.initial - self.minimum) * cosine_term
 
