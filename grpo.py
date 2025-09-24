@@ -1402,9 +1402,9 @@ if __name__ == "__main__":
 
                 global_step += 1
                 actor.global_step = global_step  # update global step in actor
-                actor.update_delta(global_step)
-                if args.track:
-                    wandb.log({"train/delta": actor.delta}, step=global_step)
+                # actor.update_delta(global_step)
+                # if args.track:
+                #     wandb.log({"train/delta": actor.delta}, step=global_step)
                 print("Step", global_step, "loss:", loss.item())
                 current_lr = optimizer.param_groups[0]['lr']
                 wandb.log({"train/learning_rate": current_lr}, step=global_step)
