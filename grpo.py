@@ -1396,7 +1396,8 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
+                grad_norm_total = nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
+                wandb.log({"train/grad_norm_total": grad_norm_total.item() if isinstance(grad_norm_total, torch.Tensor) else float(grad_norm_total)}, step=global_step)
                 optimizer.step()
                 scheduler.step()
 
