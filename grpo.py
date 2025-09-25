@@ -511,6 +511,10 @@ class Actor(nn.Module):
                 green_red_maps.scatter_(dim=-1, index=topk.indices, value=1.0)
         else:
             green_red_maps = green_red_prob_logits
+        
+        # get green_token_ratio
+        with torch.no_grad():
+            green_token_ratios = [(torch.sum(m[self.mapping_list]) / len(self.mapping_list)).item() for m in green_red_maps]
 
         # start_time = time.time()
         # Tokenize the batch
@@ -593,7 +597,7 @@ class Actor(nn.Module):
         scores = [s for scores_ in scores for s in scores_]  # flatten the list of tensors
         # if has_gradient: import pdb; pdb.set_trace()  # check scores shape, check if has gradient
         scores = [None if t == '.' else s for t, s in zip(texts, scores)]  # empty texts should have None score
-        return scores, green_red_prob_logits
+        return scores, green_red_prob_logits, green_token_ratios
 
     def compute_ppl(self, texts):
         ppl_results = []
@@ -669,31 +673,31 @@ class Actor(nn.Module):
         start_time = time.time()
         ori_has_gradient = has_gradient and (self.config.binary or bool(detect_score_coefs['ori']))
         seeds = [seed * 10 + 0] * B
-        detect_ori, ori_green_red_probs = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+        detect_ori, ori_green_red_probs, ori_green_token_ratios = self.detect(batch['original_text'], has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
         batch['ori_green_red_probs'] = ori_green_red_probs
         if self.config.strengthen:
-            detect_ori_para, _ = self.detect(attack_ori_para_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
-            detect_ori_senti, _ = self.detect(attack_ori_senti_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
-            detect_ori_hate, _ = self.detect(attack_ori_hate_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_para, _, _ = self.detect(attack_ori_para_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_senti, _, _ = self.detect(attack_ori_senti_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
+            detect_ori_hate, _, _ = self.detect(attack_ori_hate_texts, has_gradient=ori_has_gradient, rng=rng, seeds=seeds)
 
         seeds = [seed * 10 + i for i in range(G)] * B
         seeds = [s for s in seeds for _ in range(num_wm)]
 
         wm_has_gradient=has_gradient and bool(detect_score_coefs['wm'])
-        detect_wm, wm_green_red_probs = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient, rng=rng, seeds=seeds)
+        detect_wm, wm_green_red_probs, wm_green_token_ratios = self.detect([t for b in batch['watermarked_texts'] for g in b for t in g], has_gradient=wm_has_gradient, rng=rng, seeds=seeds)
         detect_wm = regroup_list(detect_wm, B, G, num_wm)
         batch['wm_green_red_probs'] = wm_green_red_probs
 
         para_has_gradient=has_gradient and bool(detect_score_coefs['para'])
-        detect_para, _ = self.detect(attack_para_texts, has_gradient=para_has_gradient, rng=rng, seeds=seeds)
+        detect_para, _, para_green_token_ratios = self.detect(attack_para_texts, has_gradient=para_has_gradient, rng=rng, seeds=seeds)
         detect_para = regroup_list(detect_para, B, G, num_wm)
 
         senti_has_gradient=has_gradient and bool(detect_score_coefs['senti'])
-        detect_senti, _ = self.detect(attack_senti_texts, has_gradient=senti_has_gradient, rng=rng, seeds=seeds)
+        detect_senti, _, senti_green_token_ratios = self.detect(attack_senti_texts, has_gradient=senti_has_gradient, rng=rng, seeds=seeds)
         detect_senti = regroup_list(detect_senti, B, G, num_wm)
 
         hate_has_gradient=has_gradient and bool(detect_score_coefs['hate'])
-        detect_hate, _ = self.detect(attack_hate_texts, has_gradient=hate_has_gradient, rng=rng, seeds=seeds)
+        detect_hate, _, hate_green_token_ratios = self.detect(attack_hate_texts, has_gradient=hate_has_gradient, rng=rng, seeds=seeds)
         detect_hate = regroup_list(detect_hate, B, G, num_wm)
         detect_time = time.time() - start_time
         print(f"Detection time: {detect_time:.4f} seconds")
@@ -823,6 +827,10 @@ class Actor(nn.Module):
             # 'detect_senti_latter': torch.tensor([d for d in detect_senti_latter if d is not None]),
             'detect_hate': torch.tensor(detect_hate).flatten(),
             'detect_overall': torch.tensor(detect_overall),
+            'ori_green_token_ratios': torch.tensor(ori_green_token_ratios),
+            'para_green_token_ratios': torch.tensor([r for r in para_green_token_ratios if r is not None]),
+            'senti_green_token_ratios': torch.tensor([r for r in senti_green_token_ratios if r is not None]),
+            'hate_green_token_ratios': torch.tensor(hate_green_token_ratios),
             # =======debug======== #
             'sucess_para': len([t for t in attack_para_texts if t is not None]) / len(attack_para_texts),
             'sucess_senti': len([t for t in attack_senti_texts if t is not None]) / len(attack_senti_texts),
@@ -884,17 +892,17 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         seeds=[seed * 10 + 0] * len(valid_batch['original_text'])
     else:
         seeds=None
-    detect_ori, _ = actor.detect(valid_batch['original_text'], has_gradient=False, rng=rng, seeds=seeds)
+    detect_ori, _, ori_green_token_ratios = actor.detect(valid_batch['original_text'], has_gradient=False, rng=rng, seeds=seeds)
     if config.strengthen:
-        detect_ori_para, _ = actor.detect(attack_ori_para_texts, has_gradient=False, rng=rng, seeds=seeds)
-        detect_ori_senti, _ = actor.detect(attack_ori_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
-        detect_ori_hate, _ = actor.detect(attack_ori_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_para, _, _ = actor.detect(attack_ori_para_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_senti, _, _ = actor.detect(attack_ori_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
+        detect_ori_hate, _, _ = actor.detect(attack_ori_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
         detect_ori_para = [d for d in detect_ori_para if d is not None]
         detect_ori_senti = [d for d in detect_ori_senti if d is not None]
-    detect_wm, _ = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
-    detect_para, _ = actor.detect(attack_para_texts, has_gradient=False, rng=rng, seeds=seeds)
-    detect_senti, _ = actor.detect(attack_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
-    detect_hate, _ = actor.detect(attack_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_wm, _, para_green_token_ratios = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
+    detect_para, _, para_green_token_ratios = actor.detect(attack_para_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_senti, _, senti_green_token_ratios = actor.detect(attack_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
+    detect_hate, _, hate_green_token_ratios = actor.detect(attack_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_para = [d for d in detect_para if d is not None]
     detect_senti = [d for d in detect_senti if d is not None]
     
@@ -910,6 +918,10 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         "eval/median_para_score": safe_median(detect_para),
         "eval/median_senti_score": safe_median(detect_senti),
         "eval/median_hate_score": safe_median(detect_hate),
+        "eval/ori_green_ratio": safe_median(ori_green_token_ratios),
+        "eval/para_green_ratio": safe_median(para_green_token_ratios),
+        "eval/senti_green_ratio": safe_median(senti_green_token_ratios),
+        "eval/hate_green_ratio": safe_median(hate_green_token_ratios), 
     }, step=actor.global_step)
     # if 'ppl' in result_dict:
     #     wandb.log({
@@ -921,14 +933,14 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
             "eval/median_ori_senti_score": safe_median(detect_ori_senti),
             "eval/median_ori_hate_score": safe_median(detect_ori_hate),
         }, step=actor.global_step)
-    # Compute and log green token ratios
-    with torch.no_grad():
-        green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'], rng=rng, seeds=seeds)
-    wandb.log({
-        "eval/green_ratio_mean": np.mean(green_token_ratios),
-        "eval/green_ratio_max": np.max(green_token_ratios),
-        "eval/green_ratio_min": np.min(green_token_ratios),
-    }, step=actor.global_step)
+    # # Compute and log green token ratios
+    # with torch.no_grad():
+    #     green_token_ratios = actor.get_green_token_ratio(valid_batch['original_text'], rng=rng, seeds=seeds)
+    # wandb.log({
+    #     "eval/green_ratio_mean": np.mean(green_token_ratios),
+    #     "eval/green_ratio_max": np.max(green_token_ratios),
+    #     "eval/green_ratio_min": np.min(green_token_ratios),
+    # }, step=actor.global_step)
     # Compute and log the auc for each dimension
     auc_detect, _, _ = calculate_roc_auc(detect_ori, detect_wm)
     auc_para, _, _ = calculate_roc_auc(detect_ori, detect_para)
@@ -1176,6 +1188,10 @@ if __name__ == "__main__":
                 all_success_senti=result_dict['sucess_senti'],
                 zero_rewards_group=zero_rewards_group,
                 one_rewards_group=one_rewards_group,
+                ori_green_token_ratios=result_dict['ori_green_token_ratios'],
+                para_green_token_ratios=result_dict['para_green_token_ratios'],
+                senti_green_token_ratios=result_dict['senti_green_token_ratios'],
+                hate_green_token_ratios=result_dict['hate_green_token_ratios'],
                 ppl=result_dict.get('ppl', None),
                 all_rewards_detect_ori_para=result_dict.get('detect_ori_para', None),
                 all_rewards_detect_ori_senti=result_dict.get('detect_ori_senti', None),
