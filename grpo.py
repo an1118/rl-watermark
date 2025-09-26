@@ -828,6 +828,7 @@ class Actor(nn.Module):
             'detect_hate': torch.tensor(detect_hate).flatten(),
             'detect_overall': torch.tensor(detect_overall),
             'ori_green_token_ratios': torch.tensor(ori_green_token_ratios),
+            'wm_green_token_ratios': torch.tensor(wm_green_token_ratios),
             'para_green_token_ratios': torch.tensor([r for r in para_green_token_ratios if r is not None]),
             'senti_green_token_ratios': torch.tensor([r for r in senti_green_token_ratios if r is not None]),
             'hate_green_token_ratios': torch.tensor(hate_green_token_ratios),
@@ -899,7 +900,7 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         detect_ori_hate, _, _ = actor.detect(attack_ori_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
         detect_ori_para = [d for d in detect_ori_para if d is not None]
         detect_ori_senti = [d for d in detect_ori_senti if d is not None]
-    detect_wm, _, para_green_token_ratios = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
+    detect_wm, _, wm_green_token_ratios = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
     detect_para, _, para_green_token_ratios = actor.detect(attack_para_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_senti, _, senti_green_token_ratios = actor.detect(attack_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_hate, _, hate_green_token_ratios = actor.detect(attack_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
@@ -919,6 +920,7 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         "eval/median_senti_score": safe_median(detect_senti),
         "eval/median_hate_score": safe_median(detect_hate),
         "eval/ori_green_ratio": safe_median(ori_green_token_ratios),
+        "eval/wm_green_ratio": safe_median(wm_green_token_ratios),
         "eval/para_green_ratio": safe_median(para_green_token_ratios),
         "eval/senti_green_ratio": safe_median(senti_green_token_ratios),
         "eval/hate_green_ratio": safe_median(hate_green_token_ratios), 
@@ -1189,6 +1191,7 @@ if __name__ == "__main__":
                 zero_rewards_group=zero_rewards_group,
                 one_rewards_group=one_rewards_group,
                 ori_green_token_ratios=result_dict['ori_green_token_ratios'],
+                wm_green_token_ratios=result_dict['wm_green_token_ratios'],
                 para_green_token_ratios=result_dict['para_green_token_ratios'],
                 senti_green_token_ratios=result_dict['senti_green_token_ratios'],
                 hate_green_token_ratios=result_dict['hate_green_token_ratios'],
