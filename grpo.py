@@ -1312,9 +1312,9 @@ if __name__ == "__main__":
                     G = args.G
                     num_wm = args.num_wm
                     mb_ori_green_red_probs = torch.repeat_interleave(mb_ori_green_red_probs, repeats=G*num_wm, dim=0) # [mb_size*G*num_wm, D]
-                    cos = F.cosine_similarity(mb_ori_green_red_probs, mb_wm_green_red_probs, dim=-1) # [mb_size*G*num_wm] 
-                    loss_sim = 1.0 - cos.mean()
-                    del mb_ori_green_red_probs, mb_wm_green_red_probs, cos, mb_original_text, mb_watermarked_texts
+                    euclidean_dist = torch.norm(mb_ori_green_red_probs - mb_wm_green_red_probs, dim=-1)  # [mb_size*G*num_wm]
+                    loss_sim = euclidean_dist.mean()
+                    del mb_ori_green_red_probs, mb_wm_green_red_probs, euclidean_dist, mb_original_text, mb_watermarked_texts
 
                 ### compute loss
                 total_loss_pg, total_loss_rg, total_kl, total_output_len = 0, 0, 0, 0
