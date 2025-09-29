@@ -437,3 +437,66 @@ class DeltaCosineScheduler:
         cosine_term = 0.5 * (1 + cos(pi * progress))
         return self.minimum + (self.initial - self.minimum) * cosine_term
 
+
+def gumbel_topk_logprobs_with_per_element(mappings: torch.Tensor,
+                                          green_red_prob_logit: torch.Tensor,
+                                          order_idx: torch.Tensor):
+    """
+    mappings: [B, D] binary (1 = selected). All rows have the same K = mappings.sum(-1).
+    green_red_prob_logit: [1, D] = phi (requires grad).
+    order_idx: [B, D] indices that sort elements by descending perturbed score (highest first).
+
+    Returns:
+      log_prob_total:        [B]     log P(ordered top-k sample)
+      per_elem_logprob_topk: [B, K]  per-element stagewise log-probs for the K selected items (in order)
+      topk_idx:              [B, K]  indices of selected items (columns of mappings) in selection order
+    """
+    B, D = mappings.shape
+
+    # K (same for all rows); vectorized check then scalar
+    K_row = mappings.sum(dim=1).to(torch.long)                 # [B]
+    # (optional safety) ensure all rows share the same K
+    if not torch.all(K_row.eq(K_row[0])):
+        raise ValueError("All rows must have the same K.")
+    K = int(K_row[0].item())
+
+    # Broadcast phi to batch and gather in the realized order
+    phi = green_red_prob_logit.expand(B, -1)                   # [B, D]
+    phi_sorted = phi.gather(1, order_idx)                      # [B, D]
+
+    # Numerically-stable suffix log-sum-exp for denominators over the "remaining" set at each stage
+    c = phi.max(dim=1, keepdim=True).values                    # [B, 1]
+    w_sorted = torch.exp(phi_sorted - c)                       # [B, D]
+    suffix_sum = torch.flip(torch.cumsum(torch.flip(w_sorted, [1]), dim=1), [1])  # [B, D]
+    log_denom = torch.log(suffix_sum) + c                      # [B, D]
+
+    # Stagewise log-prob terms (Plackett–Luce / Theorem 1)
+    log_terms = phi_sorted - log_denom                         # [B, D]
+
+    # Keep only the first K stages (the chosen top-k)
+    per_elem_logprob_topk = log_terms[:, :K]                   # [B, K]
+
+    # Total ordered log-prob is the sum of stagewise terms
+    log_prob_total = per_elem_logprob_topk.sum(dim=1)          # [B]
+
+    return log_prob_total, per_elem_logprob_topk
+
+
+def relaxed_topk(scores, k, temperature=1.0, eps=1e-12):
+    """
+    Plötz–Roth relaxed top-k in O(k n), fully vectorized over batch.
+    scores: [..., n] real-valued (e.g., log w + gumbel) / temperature
+    returns a_soft: [..., n] in [0,1], sum over last dim == k
+    """
+    # logits for step 1
+    alpha = scores / max(temperature, eps)          # [..., n]
+    a_sum = torch.zeros_like(scores)                # [..., n]
+
+    # Iteratively place k soft '1-hot' masses, discounting previously chosen mass
+    for _ in range(k):
+        p = F.softmax(alpha, dim=-1)               # soft pick for this slot, sums to 1
+        a_sum = a_sum + p                          # accumulate; final sum will be k
+        # alpha <- alpha + log(1 - p)  (elementwise), numerically safe
+        alpha = alpha + torch.log1p(-p.clamp(max=1.0 - eps))
+
+    return a_sum                                    # soft k-hot

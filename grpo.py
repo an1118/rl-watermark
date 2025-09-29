@@ -25,7 +25,8 @@ from util import (
     sign_ste, step_ste, watermark_logits_bias, run_attacks, fill_na, 
     print_and_log, create_reference_model, calculate_roc_auc,
     regroup_list, curriculum_learning_schedule, coef_strategy, 
-    str_to_torch_dtype, DeltaCosineScheduler
+    str_to_torch_dtype, DeltaCosineScheduler, gumbel_topk_logprobs_with_per_element,
+    relaxed_topk
 )
 from text_quality_score import _judge_text_quality
 
@@ -317,14 +318,14 @@ class Actor(nn.Module):
         green_red_map_lst = torch.cat(green_red_map_lst, dim=0)  # [G, 384]
 
         # For each mapping, compute the log probability of getting that mapping given green_red_prob_logit
-        green_red_map_logps = self.get_logps(green_red_map_lst, green_red_prob_logit, seeds=seeds, rng=rng)
+        green_red_map_logps, order_idx = self.get_logps(green_red_map_lst, green_red_prob_logit, seeds=seeds, rng=rng)
 
         # Generate watermarked texts
         green_red_splits = [m[self.mapping_list] for m in green_red_map_lst]
         watermarked_texts = [self.generate_watermarked_text(text, split, n=self.config.num_wm) for split in green_red_splits] # list of list of strings, len: (G, num_wm)
-        return green_red_map_lst, green_red_map_logps, watermarked_texts
+        return green_red_map_lst, green_red_map_logps, watermarked_texts, order_idx
 
-    def get_logps(self, mappings, green_red_prob_logit, seeds=None, rng=None):
+    def get_logps(self, mappings, green_red_prob_logit, seeds=None, rng=None, order_idx=None):
         eps = self.config.eps
         if mappings.dim() == 1:
             mappings = mappings.unsqueeze(0)
@@ -332,32 +333,24 @@ class Actor(nn.Module):
             green_red_prob_logit = green_red_prob_logit.unsqueeze(0)
 
         if self.config.detect_gr_split_way == 'top-k':
-            tau = max(self.config.topk_tau, eps)
-            # reconstruct gumbel perturbed logits
-            gumbels_lst = []
-            for i in range(len(mappings)):
-                rng.manual_seed(seeds[i])
-                gumbels = -torch.log(
-                    -torch.log(torch.rand(mappings[i].shape, device=mappings.device, generator=rng) + eps) + eps
-                )
-                gumbels_lst.append(gumbels)
-            gumbels = torch.stack(gumbels_lst)
-            scores = (green_red_prob_logit + gumbels) / tau
-            # log-softmax per row
-            logp = torch.log_softmax(scores, dim=-1)
-            # Use the *hard* part of the ST mask for which positions were selected
-            hard_sel = (mappings.detach() >= 0.5).float()  # [G, D]
-            # Check that each row in hard_sel has approximately half True values
-            num_selected = hard_sel.sum(dim=-1)
-            expected_selected = hard_sel.size(-1) // 2
-            assert torch.all((num_selected == expected_selected)), \
-                f"Each row in hard_sel should have half True. Got: {num_selected.tolist()}, expected: {expected_selected}"
+            if order_idx is None:
+                tau = max(self.config.topk_tau, eps)
+                # reconstruct gumbel perturbed logits
+                gumbels_lst = []
+                for i in range(len(mappings)):
+                    rng.manual_seed(seeds[i])
+                    gumbels = -torch.log(
+                        -torch.log(torch.rand(mappings[i].shape, device=mappings.device, generator=rng) + eps) + eps
+                    )
+                    gumbels_lst.append(gumbels)
+                gumbels = torch.stack(gumbels_lst)
+                scores = (green_red_prob_logit + gumbels) / tau
+                order_idx = torch.argsort(scores, dim=-1, descending=True)   # [B, D]
+            log_prob_total, per_elem_logprob = gumbel_topk_logprobs_with_per_element(mappings, green_red_prob_logit, order_idx)
             if self.config.one_step_action:
-                # Sum log-probs over selected indices; (with-replacement surrogate)
-                log_prob = torch.sum(logp * hard_sel, dim=-1)  # [G]
+                log_prob = log_prob_total  # [G]
             else:
-                # For positions where mappings == 1, keep logp; otherwise, use a small value (e.g., -1e8)
-                log_prob = logp * hard_sel + (1 - hard_sel) * eps
+                log_prob = per_elem_logprob  # [G, 384]
         else:
             log_prob = (
                 mappings * torch.log(green_red_prob_logit.clamp_min(eps)) +
@@ -366,7 +359,7 @@ class Actor(nn.Module):
             if self.config.one_step_action:
                 log_prob = torch.sum(log_prob, dim=-1)  # [G]
         mappings_logps = [lp for lp in log_prob]  # keep output as list of tensors for compatibility
-        return mappings_logps
+        return mappings_logps, order_idx
 
     def generate_watermarked_text(self, text, green_red_split, n=1):
         # add prompt instruction
@@ -404,7 +397,7 @@ class Actor(nn.Module):
         topk = torch.topk(scaled, k=k, dim=-1)
         hard_mask = torch.zeros_like(logits)
         hard_mask.scatter_(dim=-1, index=topk.indices, value=1.0)
-        soft_mask = torch.softmax(scaled, dim=-1)
+        soft_mask = relaxed_topk(scaled, k, tau, eps)
         return hard_mask - soft_mask.detach() + soft_mask
 
     def _get_green_red_split(self, model, texts):
@@ -473,7 +466,7 @@ class Actor(nn.Module):
             texts = ['.' if t is None else t for t in texts]
         elif isinstance(texts, str):
             if texts is None:
-                return [None]
+                return [None], None, None
             texts = [texts]
         else:
             raise ValueError("texts should be a list of strings or a single string.")
@@ -1139,7 +1132,7 @@ if __name__ == "__main__":
             # import pdb; pdb.set_trace()  # check batch['original_text'] shape -> list [B]
             for data_idx in tqdm(range(len(batch['original_text'])), desc="Rolling out one batch"):
                 original_data = batch['original_text'][data_idx]
-                green_red_maps, green_red_map_logps, watermarked_texts = actor.rollout(original_data, args.G, rng, seed)  # device: cpu
+                green_red_maps, green_red_map_logps, watermarked_texts, order_idx = actor.rollout(original_data, args.G, rng, seed)  # device: cpu
                 assert len(green_red_maps) == len(green_red_map_logps) == len(watermarked_texts) == args.G, \
                     f"data_idx {data_idx}: rollout length not equal to G. {len(green_red_maps)}, {len(green_red_map_logps)}, {len(watermarked_texts)} vs {args.G}"
                 assert all([len(t) == args.num_wm for t in watermarked_texts]), \
@@ -1147,6 +1140,7 @@ if __name__ == "__main__":
                 batch['green_red_maps'].append(green_red_maps)
                 batch['green_red_map_logps'].append(green_red_map_logps)
                 batch['watermarked_texts'].append(watermarked_texts)
+                batch['order_idx'].append(order_idx)
             # import pdb; pdb.set_trace()  # check shape
             
             ## compute rewards
@@ -1227,6 +1221,7 @@ if __name__ == "__main__":
                 mb_green_red_maps = [batch['green_red_maps'][idx] for idx in mb_inds]  # [mb_size, G, 384]
                 mb_green_red_map_logps = [batch['green_red_map_logps'][idx] for idx in mb_inds]  # [mb_size, G] if one_step_action is true, else [mb_size, G, 384]
                 mb_watermarked_texts = [batch['watermarked_texts'][idx] for idx in mb_inds]  # [mb_size, G, num_wm]
+                mb_order_idx = [batch['order_idx'][idx] for idx in mb_inds]  # [mb_size, G]
                 mb_attack_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_texts'].items()}  # {attack_name: [mb_size, G, num_wm]}
                 if args.strengthen:
                     mb_attack_ori_texts = {k: [v[idx] for idx in mb_inds] for k, v in batch['attack_ori_texts'].items()}  # {attack_name: [mb_size]} 
@@ -1245,14 +1240,14 @@ if __name__ == "__main__":
                     seeds = [seed * 10 + i for i in range(args.G)]
                 else:
                     seeds = None
-                for original_text, green_red_maps in zip(mb_original_text, mb_green_red_maps):
+                for original_text, green_red_maps, order_idx in zip(mb_original_text, mb_green_red_maps, mb_order_idx):
                     green_red_prob_logit = actor._get_green_red_split(actor.embed_map_model, original_text)
-                    new_logprobs = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng)
+                    new_logprobs, _ = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng, order_idx=order_idx)
                     new_mb_logprobs.append(new_logprobs)
                     if args.beta != 0.0:
                         with torch.no_grad():
                             green_red_prob_logit = actor._get_green_red_split(actor.reference_embed_map_model, original_text)
-                            ref_logprobs = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng)
+                            ref_logprobs, _ = actor.get_logps(green_red_maps, green_red_prob_logit, seeds=seeds, rng=rng, order_idx=order_idx)
                             per_token_kl = [torch.exp(ref - new) - (ref - new) - 1 for ref, new in zip(ref_logprobs, new_logprobs)]
                             # import pdb; pdb.set_trace()  # check if per_token_kl shape, should be [G] if one_step_action is true, else [G, 384]
                             all_per_token_kl.append(per_token_kl)
@@ -1364,7 +1359,7 @@ if __name__ == "__main__":
                         if args.one_step_action:
                             total_output_len += 1
                         else:
-                            total_output_len += len(new_logprobs)
+                            total_output_len += 384  # TODO: hardcoded
                 
                 ### log gradient norm
                 if args.log_grad_norm:
