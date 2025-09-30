@@ -886,19 +886,21 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         seeds=[seed * 10 + 0] * len(valid_batch['original_text'])
     else:
         seeds=None
-    detect_ori, _, ori_green_token_ratios = actor.detect(valid_batch['original_text'], has_gradient=False, rng=rng, seeds=seeds)
+    detect_ori, ori_green_red_prob_logits, ori_green_token_ratios = actor.detect(valid_batch['original_text'], has_gradient=False, rng=rng, seeds=seeds)
     if config.strengthen:
         detect_ori_para, _, _ = actor.detect(attack_ori_para_texts, has_gradient=False, rng=rng, seeds=seeds)
         detect_ori_senti, _, _ = actor.detect(attack_ori_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
         detect_ori_hate, _, _ = actor.detect(attack_ori_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
         detect_ori_para = [d for d in detect_ori_para if d is not None]
         detect_ori_senti = [d for d in detect_ori_senti if d is not None]
-    detect_wm, _, wm_green_token_ratios = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
+    detect_wm, wm_green_red_prob_logits, wm_green_token_ratios = actor.detect([t for b in valid_batch['watermarked_texts'] for g in b for t in g], has_gradient=False, rng=rng, seeds=seeds)
     detect_para, _, para_green_token_ratios = actor.detect(attack_para_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_senti, _, senti_green_token_ratios = actor.detect(attack_senti_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_hate, _, hate_green_token_ratios = actor.detect(attack_hate_texts, has_gradient=False, rng=rng, seeds=seeds)
     detect_para = [d for d in detect_para if d is not None]
     detect_senti = [d for d in detect_senti if d is not None]
+
+    euclidean_dist = torch.norm(ori_green_red_prob_logits - wm_green_red_prob_logits, dim=-1).mean()
     
     # Log the median of each score to wandb
     def safe_median(x):
@@ -917,6 +919,7 @@ def evaluation(actor, valid_set, config, best_auc, rng=None, seed=None):
         "eval/para_green_ratio": safe_median(para_green_token_ratios),
         "eval/senti_green_ratio": safe_median(senti_green_token_ratios),
         "eval/hate_green_ratio": safe_median(hate_green_token_ratios), 
+        "eval/ori_wm_euclidean_dist": euclidean_dist.item(),
     }, step=actor.global_step)
     # if 'ppl' in result_dict:
     #     wandb.log({
